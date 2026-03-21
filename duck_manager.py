@@ -73,6 +73,11 @@ COOLDOWN_STD = 360.0   # seconds
 COOLDOWN_MIN = 1      # seconds
 COOLDOWN_MAX = 15 * 60  # 30 minutes
 
+# Keish blessing: rare proc, then no !duck cooldown for a short window
+BLESSING_PROB = 0.01
+BLESSING_DURATION_SECONDS = 11
+BLESSING_ASSET_PATH = Path(__file__).resolve().parent / "assets" / "blessing.gif"
+
 REVENGE_WINDOW_SECONDS = 5 * 60
 REVENGE_SWING_STEAL_THRESHOLD = 20
 
@@ -157,6 +162,10 @@ def _roll_cooldown_seconds() -> int:
     val = max(COOLDOWN_MIN, min(COOLDOWN_MAX, val))
     return int(round(val))
 
+
+def _utc_ts() -> int:
+    return int(datetime.now(timezone.utc).timestamp())
+
 def _fmt_duration(seconds: int) -> str:
     m, s = divmod(seconds, 60)
     if m <= 0:
@@ -218,6 +227,7 @@ class DuckManager(commands.Cog, name="DuckManager"):
         self.dashboard_base_url = getattr(bot, "duck_dashboard_base_url", "https://duck.jocal.dev/user").rstrip("/")
         self.db = sqlite3.connect(str(DATA_DIR / "ducks.db"))
         self.db.row_factory = sqlite3.Row
+        self._blessing_until: dict[str, int] = {}  # user_id -> unix ts when Keish blessing ends
         self._init_db()
         _log("[DuckManager] initialized")
 
@@ -403,11 +413,32 @@ class DuckManager(commands.Cog, name="DuckManager"):
         ducks_list = json.loads(row["ducks_json"]) if row and row["ducks_json"] else []
         self._set_user(user_id, ducks_list, None, None)
 
+    def _blessing_active(self, user_id: str) -> bool:
+        until = self._blessing_until.get(user_id)
+        if until is None:
+            return False
+        now = _utc_ts()
+        if now >= until:
+            del self._blessing_until[user_id]
+            return False
+        return True
+
+    def _blessing_remaining(self, user_id: str) -> int:
+        until = self._blessing_until.get(user_id)
+        if until is None:
+            return 0
+        return max(0, until - _utc_ts())
+
+    def _grant_blessing(self, user_id: str):
+        self._blessing_until[user_id] = _utc_ts() + BLESSING_DURATION_SECONDS
+
     def _check_on_cooldown(self, user_id: str) -> tuple[bool, int]:
+        if self._blessing_active(user_id):
+            return False, 0
         row = self._get_user(user_id)
         if not row or not row["last_catch"] or not row["cooldown"]:
             return False, 0
-        now_ts = int(datetime.now(timezone.utc).timestamp())
+        now_ts = _utc_ts()
         ready_ts = row["last_catch"] + row["cooldown"]
         if now_ts < ready_ts:
             return True, ready_ts - now_ts
@@ -716,7 +747,8 @@ class DuckManager(commands.Cog, name="DuckManager"):
         Catch a duck via the Duck API.
         - Each catch creates a new duck with a unique ID.
         - 15% chance to steal a random duck from a random user instead of catching new.
-        - Applies per-user cooldown with normal distribution (μ=90s, σ=360s, 1s..30m).
+        - Applies per-user cooldown with normal distribution (μ=90s, σ=360s, 1s..30m),
+          except during an 11s Keish blessing (1% proc: no cooldowns for that window).
         - Announces catch + attributes (+ theft mention) and cooldown message.
         """
         # Restrict execution to the ducks channel
@@ -808,12 +840,29 @@ class DuckManager(commands.Cog, name="DuckManager"):
                 self._add_duck_to_user(new_owner_id, duck_id)
                 self._set_duck_owner(duck_id, new_owner_id)
 
-            # 4) roll & set cooldown for the catcher
-            cd = self._update_cooldown(new_owner_id)
-            cd_msg = (f"Your energy is preserved! Next catch available in: **{_fmt_duration(cd)}**."
-                      if cd <= COOLDOWN_MEAN else
-                      f"You're feeling a bit tired... Next catch available in: **{_fmt_duration(cd)}**.")
-            
+            # 4) Keish blessing (1%) + cooldown (skipped while blessing is active)
+            is_blessing_proc = random.random() < BLESSING_PROB
+            if is_blessing_proc:
+                self._grant_blessing(new_owner_id)
+
+            blessing_now = self._blessing_active(new_owner_id)
+            if blessing_now:
+                if is_blessing_proc:
+                    cd_msg = (
+                        "✨ **Keish's ENERGY** lasts **11 seconds**—`!duck` ignores cooldown until it fades. "
+                        "Your next catch after that sets a normal cooldown."
+                    )
+                else:
+                    rem = self._blessing_remaining(new_owner_id)
+                    cd_msg = f"✨ Keish's ENERGY active—**{rem}s** left; **no `!duck` cooldown** until it ends."
+            else:
+                cd = self._update_cooldown(new_owner_id)
+                cd_msg = (
+                    f"Your energy is preserved! Next catch available in: **{_fmt_duration(cd)}**."
+                    if cd <= COOLDOWN_MEAN
+                    else f"You're feeling a bit tired... Next catch available in: **{_fmt_duration(cd)}**."
+                )
+
             # 5) flavor + attributes message
             rarity = duck_row["rarity"]
             name = duck_row["name"]
@@ -822,21 +871,49 @@ class DuckManager(commands.Cog, name="DuckManager"):
 
             flair = RARITY_CATCH_FLAIR[rarity]
             color = RARITY_EMBED_COLORS.get(rarity, discord.Color.dark_grey())
+            if is_blessing_proc:
+                color = discord.Color.gold()
+
+            blessing_intro = ""
+            if is_blessing_proc:
+                blessing_intro = (
+                    "**A wild Keish appears!** The water stills—then the **spirit of thrill** sparks along your line. "
+                    "**No `!duck` cooldowns** for the next **10 seconds**; the pond can't hold you back.\n\n"
+                )
+
+            title = f"{'🌟✨ Shiny Duck Appeared! ✨🌟 ' if shiny else ''}Congrats on your new duck!{' SO SHINY!' if shiny else ''}"
+            if is_blessing_proc:
+                title = (
+                    "✨ Keish Snags A Duck From The Sky For You! ✨"
+                    if not shiny
+                    else "🌟✨ Keish Saddles A Shiny Duck and Tames It For You! ✨🌟"
+                )
 
             embed = discord.Embed(
-                title=f"{'🌟✨ Shiny Duck Appeared! ✨🌟 ' if shiny else ''}Congrats on your new duck!{' SO SHINY!' if shiny else ''}",
+                title=title,
                 description=(
+                    f"{blessing_intro}"
                     f"{flair}\n\n"
                     f"**Name:** {name}\n"
                     f"**Rarity:** {rarity}{' ✨' if shiny else ''}\n"
                     f"**Stats:** ⚔️ {atk}  🛡️ {dfs}  💨 {spd}\n"
                 ),
-                color=color
+                color=color,
             )
-            embed.set_image(url=duck_row["url"])
+            blessing_file = None
+            if is_blessing_proc and BLESSING_ASSET_PATH.is_file():
+                blessing_file = discord.File(BLESSING_ASSET_PATH, filename="blessing.gif")
+                embed.set_thumbnail(url=duck_row["url"])
+                embed.set_image(url="attachment://blessing.gif")
+            else:
+                embed.set_image(url=duck_row["url"])
+
             embed.set_footer(text=cd_msg)
 
-            await ctx.reply(embed=embed, mention_author=False)
+            if blessing_file:
+                await ctx.reply(embed=embed, file=blessing_file, mention_author=False)
+            else:
+                await ctx.reply(embed=embed, mention_author=False)
             if theft_text:
                 # Follow-up line in the same reply block (append text)
                 await ctx.send(theft_text)
