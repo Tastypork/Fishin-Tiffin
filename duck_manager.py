@@ -75,7 +75,8 @@ COOLDOWN_MAX = 15 * 60  # 30 minutes
 
 # Keish blessing: rare proc, then no !duck cooldown for a short window
 BLESSING_PROB = 0.01
-BLESSING_DURATION_SECONDS = 11
+BLESSING_DURATION_SECONDS = 20  # actual window; user-facing text uses half (10s announced, countdown shows rem//2)
+BLESSING_DISPLAY_SECONDS = BLESSING_DURATION_SECONDS // 2
 BLESSING_ASSET_PATH = Path(__file__).resolve().parent / "assets" / "blessing.gif"
 
 REVENGE_WINDOW_SECONDS = 5 * 60
@@ -438,6 +439,22 @@ class DuckManager(commands.Cog, name="DuckManager"):
             ducks_list.remove(duck_id)
         self._set_user(user_id, ducks_list, row["last_catch"], row["cooldown"])
 
+    def _get_owned_duck_row_by_name(self, user_id: str, duck_name: str) -> sqlite3.Row | None:
+        """Duck row for this name if it appears in the user's collection (handles global duplicate names)."""
+        urow = self._get_user(user_id)
+        if not urow or not urow["ducks_json"]:
+            return None
+        duck_ids = json.loads(urow["ducks_json"])
+        if not duck_ids:
+            return None
+        cur = self.db.cursor()
+        q_marks = ",".join("?" * len(duck_ids))
+        cur.execute(
+            f"SELECT * FROM ducks WHERE duck_id IN ({q_marks}) AND name = ? LIMIT 1",
+            (*duck_ids, duck_name),
+        )
+        return cur.fetchone()
+
     async def _fetch_duck_url(self) -> tuple[str, int]:
         """
         Calls duck API (JSON with {'url': '...'}) and returns (url, timestamp).
@@ -514,6 +531,10 @@ class DuckManager(commands.Cog, name="DuckManager"):
         if until is None:
             return 0
         return max(0, until - _utc_ts())
+
+    def _blessing_remaining_display(self, user_id: str) -> int:
+        """Seconds left as shown to the user (half of real remaining)."""
+        return self._blessing_remaining(user_id) // 2
 
     def _grant_blessing(self, user_id: str):
         self._blessing_until[user_id] = _utc_ts() + BLESSING_DURATION_SECONDS
@@ -834,7 +855,7 @@ class DuckManager(commands.Cog, name="DuckManager"):
         - Each catch creates a new duck with a unique ID.
         - 15% chance to steal a random duck from a random user instead of catching new.
         - Applies per-user cooldown with normal distribution (μ=90s, σ=360s, 1s..30m),
-          except during an 11s Keish blessing (1% proc: no cooldowns for that window).
+          except during a Keish blessing (1% proc: 20s window, announced as 10s; no cooldowns for that window).
         - Keish proc posts a short announcement (title + description + blessing.gif + footer);
           further catches in that window use Keish snag/saddle titles on the normal stat card.
         - Announces catch + attributes (+ theft mention) and cooldown message.
@@ -939,12 +960,12 @@ class DuckManager(commands.Cog, name="DuckManager"):
             if blessing_now:
                 if is_blessing_proc:
                     cd_msg = (
-                        "✨ **Keish's ENERGY** lasts **11 seconds**—`!duck` ignores cooldown until it fades. "
+                        f"✨ **Keish's ENERGY** lasts **{BLESSING_DISPLAY_SECONDS} seconds**—`!duck` ignores cooldown until it fades. "
                         "Your next catch after that sets a normal cooldown."
                     )
                 else:
-                    rem = self._blessing_remaining(new_owner_id)
-                    cd_msg = f"✨ Keish's ENERGY active—**{rem}s** left; **no `!duck` cooldown** until it ends."
+                    rem_disp = self._blessing_remaining_display(new_owner_id)
+                    cd_msg = f"✨ Keish's ENERGY active—**{rem_disp}s** left; **no `!duck` cooldown** until it ends."
             else:
                 cd = self._update_cooldown(new_owner_id)
                 cd_msg = (
@@ -964,7 +985,7 @@ class DuckManager(commands.Cog, name="DuckManager"):
             keish_saddle_title = "🌟✨ Keish Saddles A Shiny Duck and Tames It For You! ✨🌟"
             blessing_proc_description = (
                 "The water stills—then the **spirit of thrill** sparks along your spine. "
-                f"**No `!duck` cooldowns** for the next **{BLESSING_DURATION_SECONDS} seconds**; the pond can't hold you back."
+                f"**No `!duck` cooldowns** for the next **{BLESSING_DISPLAY_SECONDS} seconds**; the pond can't hold you back."
             )
 
             # Keish proc: title + description + blessing.gif + footer only (no duck stats).
@@ -1087,9 +1108,14 @@ class DuckManager(commands.Cog, name="DuckManager"):
     @commands.command(name="showcase")
     async def showcase_duck(self, ctx: commands.Context, *, duck_name: str):
         """Showcase any duck by name (shows owner, rarity, stats, age, and image)."""
-        cur = self.db.cursor()
-        cur.execute("SELECT * FROM ducks WHERE name = ?", (duck_name,))
-        row = cur.fetchone()
+        row = self._get_owned_duck_row_by_name(str(ctx.author.id), duck_name)
+        if not row:
+            cur = self.db.cursor()
+            cur.execute(
+                "SELECT * FROM ducks WHERE name = ? ORDER BY duck_id LIMIT 1",
+                (duck_name,),
+            )
+            row = cur.fetchone()
 
         if not row:
             await ctx.reply(f"No duck named **{duck_name}** was found.")
@@ -1202,18 +1228,14 @@ class DuckManager(commands.Cog, name="DuckManager"):
             await ctx.reply("You can’t give a duck to yourself!")
             return
 
-        # Look up duck by name
-        cur = self.db.cursor()
-        cur.execute("SELECT * FROM ducks WHERE name = ?", (duck_name,))
-        row = cur.fetchone()
+        row = self._get_owned_duck_row_by_name(giver_id, duck_name)
         if not row:
-            await ctx.reply(f"No duck named **{duck_name}** was found.")
-            return
-
-        # Ownership check
-        if row["owner_id"] != giver_id:
-            owner_msg = f"<@{row['owner_id']}>" if row["owner_id"] else "no one"
-            await ctx.reply(f"**{duck_name}** is not yours to give (currently owned by {owner_msg}).")
+            cur = self.db.cursor()
+            cur.execute("SELECT 1 FROM ducks WHERE name = ? LIMIT 1", (duck_name,))
+            if cur.fetchone():
+                await ctx.reply(f"You don't have a duck named **{duck_name}** to give.")
+            else:
+                await ctx.reply(f"No duck named **{duck_name}** was found.")
             return
 
         # Remove from giver
