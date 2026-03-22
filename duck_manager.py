@@ -214,6 +214,76 @@ def build_duck_onboarding_embed(role_mention: str) -> discord.Embed:
     return embed
 
 
+DUCK_TYPO_TENOR_URL = (
+    "https://tenor.com/view/dap-dap-up-israel-adesanya-francis-ngannou-gif-8323814478209239667"
+)
+
+
+def _levenshtein(a: str, b: str) -> int:
+    """Classic Levenshtein distance (insert/delete/substitute)."""
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, start=1):
+        cur = [i]
+        for j, cb in enumerate(b, start=1):
+            ins = cur[j - 1] + 1
+            delete = prev[j] + 1
+            sub = prev[j - 1] + (ca != cb)
+            cur.append(min(ins, delete, sub))
+        prev = cur
+    return prev[-1]
+
+
+def _first_bang_command_token(content: str) -> str | None:
+    text = content.strip()
+    if not text.startswith("!"):
+        return None
+    rest = text[1:].strip()
+    if not rest:
+        return None
+    return rest.split()[0]
+
+
+def _token_looks_like_duck_typo(token: str) -> bool:
+    """True when the token is one cheap edit away from 'duck' (covers fuck/dick/suck, dock, duk, etc.)."""
+    t = token.lower()
+    if len(t) < 3 or len(t) > 7:
+        return False
+    return _levenshtein(t, "duck") <= 1
+
+
+async def try_consume_duck_typo(bot: commands.Bot, message: discord.Message) -> bool:
+    """
+    If the message looks like a mistyped !duck in the ducks channel, handle it and return True
+    so the bot skips normal command processing.
+    """
+    if message.author.bot:
+        return False
+    ducks_ch = getattr(bot, "ducks", None)
+    if ducks_ch is None or message.channel.id != ducks_ch:
+        return False
+    token = _first_bang_command_token(message.content)
+    if not token:
+        return False
+    low = token.lower()
+    if low == "duck":
+        return False
+    if low == "ducks":
+        return False
+    if not _token_looks_like_duck_typo(token):
+        return False
+    cog = bot.get_cog("DuckManager")
+    if cog is None:
+        return False
+    await cog.handle_duck_typo(message)
+    return True
+
+
 class DuckManager(commands.Cog, name="DuckManager"):
     """
     Duck game Cog:
@@ -239,6 +309,22 @@ class DuckManager(commands.Cog, name="DuckManager"):
 
     def cog_unload(self):
         self.db.close()
+
+    async def handle_duck_typo(self, message: discord.Message) -> None:
+        ctx = await self.bot.get_context(message)
+        if not await self.cog_check(ctx):
+            return
+        await message.reply(
+            f"{message.author.mention} dont worry fam i got you\n{DUCK_TYPO_TENOR_URL}",
+            mention_author=False,
+        )
+        try:
+            await self.duck(ctx)
+        finally:
+            try:
+                await message.delete()
+            except discord.HTTPException:
+                pass
 
     # ---------- DB SETUP ----------
     def _init_db(self):
@@ -753,7 +839,9 @@ class DuckManager(commands.Cog, name="DuckManager"):
         """
         # Restrict execution to the ducks channel
         if ctx.channel.id != self.bot.ducks:
-            return await ctx.reply("This command can only be used in the 🦆 ducks channel.", delete_after=5)
+            return await ctx.reply(
+                "This command can only be used in the 🦆 ducks channel.", delete_after=5
+            )
         
         try:
             pending_revenge = self._get_pending_revenge(str(ctx.author.id))

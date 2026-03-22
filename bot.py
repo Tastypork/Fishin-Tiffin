@@ -7,7 +7,7 @@ import discord
 import yaml
 from discord.ext import commands
 
-from duck_manager import DuckManager
+from duck_manager import DuckManager, try_consume_duck_typo
 
 CONFIG_FILE = Path("config.yml")
 DEFAULT_LOG_LEVEL = "INFO"
@@ -30,6 +30,11 @@ class FishinTiffin(commands.Bot):
 
     async def setup_hook(self) -> None:
         await self.add_cog(DuckManager(self, duck_api_url=self.duck_api_url))
+
+    async def on_message(self, message: discord.Message) -> None:
+        if await try_consume_duck_typo(self, message):
+            return
+        await self.process_commands(message)
 
     @staticmethod
     def _load_config() -> dict:

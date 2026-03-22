@@ -32,3 +32,5 @@ venv/
 config.yml
 duck_data/ducks.db
 duck_data/html/
+
+log.txt
