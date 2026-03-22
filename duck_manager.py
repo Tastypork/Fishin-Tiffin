@@ -835,6 +835,8 @@ class DuckManager(commands.Cog, name="DuckManager"):
         - 15% chance to steal a random duck from a random user instead of catching new.
         - Applies per-user cooldown with normal distribution (μ=90s, σ=360s, 1s..30m),
           except during an 11s Keish blessing (1% proc: no cooldowns for that window).
+        - Keish proc posts a short announcement (title + description + blessing.gif + footer);
+          further catches in that window use Keish snag/saddle titles on the normal stat card.
         - Announces catch + attributes (+ theft mention) and cooldown message.
         """
         # Restrict execution to the ducks channel
@@ -958,40 +960,49 @@ class DuckManager(commands.Cog, name="DuckManager"):
             atk, dfs, spd = duck_row["attack"], duck_row["defense"], duck_row["speed"]
 
             flair = RARITY_CATCH_FLAIR[rarity]
-            color = RARITY_EMBED_COLORS.get(rarity, discord.Color.dark_grey())
+            keish_snag_title = "✨ Keish Snags A Duck From The Sky For You! ✨"
+            keish_saddle_title = "🌟✨ Keish Saddles A Shiny Duck and Tames It For You! ✨🌟"
+            blessing_proc_description = (
+                "The water stills—then the **spirit of thrill** sparks along your spine. "
+                f"**No `!duck` cooldowns** for the next **{BLESSING_DURATION_SECONDS} seconds**; the pond can't hold you back."
+            )
+
+            # Keish proc: title + description + blessing.gif + footer only (no duck stats).
             if is_blessing_proc:
                 color = discord.Color.gold()
-
-            blessing_intro = ""
-            if is_blessing_proc:
-                blessing_intro = (
-                    "**A wild Keish appears!** The water stills—then the **spirit of thrill** sparks along your line. "
-                    "**No `!duck` cooldowns** for the next **10 seconds**; the pond can't hold you back.\n\n"
-                )
-
-            title = f"{'🌟✨ Shiny Duck Appeared! ✨🌟 ' if shiny else ''}Congrats on your new duck!{' SO SHINY!' if shiny else ''}"
-            if is_blessing_proc:
-                title = (
-                    "✨ Keish Snags A Duck From The Sky For You! ✨"
-                    if not shiny
-                    else "🌟✨ Keish Saddles A Shiny Duck and Tames It For You! ✨🌟"
-                )
-
-            embed = discord.Embed(
-                title=title,
-                description=(
-                    f"{blessing_intro}"
+                title = "A wild Keish appears!"
+                catch_body = blessing_proc_description
+            elif blessing_now:
+                # Blessing window: full duck card with Keish-themed titles.
+                color = RARITY_EMBED_COLORS.get(rarity, discord.Color.dark_grey())
+                title = keish_saddle_title if shiny else keish_snag_title
+                catch_body = (
                     f"{flair}\n\n"
                     f"**Name:** {name}\n"
                     f"**Rarity:** {rarity}{' ✨' if shiny else ''}\n"
                     f"**Stats:** ⚔️ {atk}  🛡️ {dfs}  💨 {spd}\n"
-                ),
+                )
+            else:
+                color = RARITY_EMBED_COLORS.get(rarity, discord.Color.dark_grey())
+                title = (
+                    f"{'🌟✨ Shiny Duck Appeared! ✨🌟 ' if shiny else ''}"
+                    f"Congrats on your new duck!{' SO SHINY!' if shiny else ''}"
+                )
+                catch_body = (
+                    f"{flair}\n\n"
+                    f"**Name:** {name}\n"
+                    f"**Rarity:** {rarity}{' ✨' if shiny else ''}\n"
+                    f"**Stats:** ⚔️ {atk}  🛡️ {dfs}  💨 {spd}\n"
+                )
+
+            embed = discord.Embed(
+                title=title,
+                description=catch_body,
                 color=color,
             )
             blessing_file = None
             if is_blessing_proc and BLESSING_ASSET_PATH.is_file():
                 blessing_file = discord.File(BLESSING_ASSET_PATH, filename="blessing.gif")
-                embed.set_thumbnail(url=duck_row["url"])
                 embed.set_image(url="attachment://blessing.gif")
             else:
                 embed.set_image(url=duck_row["url"])
