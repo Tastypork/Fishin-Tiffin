@@ -23,8 +23,10 @@ ZAY_STEAL_TICK_SECONDS = 2
 ZAY_STEAL_TICK_COUNT = ZAY_DURATION_SECONDS // ZAY_STEAL_TICK_SECONDS
 
 CLASH_ASSET_PATH = ASSETS_DIR / "clash.png"
-ZAY_DEFEAT_ASSET_PATH = ASSETS_DIR / "zay_defeat.png"
-ZAY_SUCCESS_ASSET_PATH = ASSETS_DIR / "zay_success.png"
+ZAY_ENERGY_GIF_PATH = ASSETS_DIR / "zay_energy.gif"
+# Finale: file names match art — steal outcome vs defended outcome
+ZAY_FINALE_WHEN_STOLE_ASSET_PATH = ASSETS_DIR / "zay_success.png"  # Zay got ducks
+ZAY_FINALE_WHEN_DEFENDED_ASSET_PATH = ASSETS_DIR / "zay_defeat.png"  # no ducks lost
 
 ZAY_PROC_TITLE = "ZAY IS STEALING YOUR DUCKS — USE `!DUCK` TO DEFEND!!!"
 ZAY_SNAG_TITLE = "🌑 New duck—but **Zay is stealing your flock!** **`!duck`** to defend!"
@@ -196,7 +198,7 @@ class ZayEnergy:
         except Exception:
             mention = f"<@{user_id}>"
 
-        if net == 0 or remove_n == 0:
+        if remove_n == 0:
             title = "You drove him off!"
             if net == 0:
                 desc = (
@@ -208,8 +210,8 @@ class ZayEnergy:
                     f"{mention} **Zay was stealing**, but nothing he could take was on the table—"
                     "**Legendary** and **Mythic** ducks are untouchable. **You're safe.**"
                 )
-            asset_path = ZAY_SUCCESS_ASSET_PATH
-            attach_name = "zay_success.png"
+            asset_path = ZAY_FINALE_WHEN_DEFENDED_ASSET_PATH
+            attach_name = "zay_defeat.png"
         else:
             title = "Zay stole from your flock…"
             names_bit = ""
@@ -222,8 +224,8 @@ class ZayEnergy:
                 f"{mention} **While he was stealing, you couldn't stop every grab.** "
                 f"**{remove_n}** duck{'s' if remove_n != 1 else ''} are gone.{names_bit}"
             )
-            asset_path = ZAY_DEFEAT_ASSET_PATH
-            attach_name = "zay_defeat.png"
+            asset_path = ZAY_FINALE_WHEN_STOLE_ASSET_PATH
+            attach_name = "zay_success.png"
 
         embed = discord.Embed(
             title=title,

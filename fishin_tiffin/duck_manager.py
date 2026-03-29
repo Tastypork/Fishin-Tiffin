@@ -1,4 +1,4 @@
-# ducks.py
+# duck_manager.py — Duck game cog (!duck, DB, Keish/Zay energy).
 from discord.ext import commands
 from datetime import datetime, timezone
 import discord
@@ -14,9 +14,9 @@ import logging
 from .duck_dashboard_html import generate_duck_dashboard_html
 from .duck_clock import utc_ts
 from .keish_energy import (
-    BLESSING_ASSET_PATH,
     BLESSING_DISPLAY_SECONDS,
     BLESSING_PROB,
+    KEISH_ENERGY_GIF_PATH,
     KEISH_PROC_TITLE,
     KEISH_SADDLE_TITLE,
     KEISH_SNAG_TITLE,
@@ -27,12 +27,10 @@ from .paths import DUCK_DATA_DIR, HTML_DIR
 from .zay_energy import (
     CLASH_ASSET_PATH,
     DEFENSE_EMBED_TITLE,
+    ZAY_ENERGY_GIF_PATH,
     ZAY_ENERGY_PROB,
     ZAY_PROC_TITLE,
-    ZAY_SADDLE_TITLE,
-    ZAY_SNAG_TITLE,
     ZayEnergy,
-    cd_message_active,
     cd_message_proc,
     defense_embed_body,
     defense_embed_footer,
@@ -94,7 +92,7 @@ BOOT_IMAGE_URLS = [
 COOLDOWN_MEAN = 90.0  # seconds
 COOLDOWN_STD = 360.0   # seconds
 COOLDOWN_MIN = 1      # seconds
-COOLDOWN_MAX = 15 * 60  # 30 minutes
+COOLDOWN_MAX = 15 * 60  # 15 minutes
 
 REVENGE_WINDOW_SECONDS = 5 * 60
 REVENGE_SWING_STEAL_THRESHOLD = 20
@@ -859,8 +857,8 @@ class DuckManager(commands.Cog, name="DuckManager"):
         """
         Catch a duck via the Duck API.
         - Each catch creates or steals a duck; per-user cooldown unless Keish's or Zay's ENERGY is active.
-        - Keish proc: announcement embed + blessing.gif; windowed snag/saddle titles on further catches.
-        - Zay proc: stealing/defend theme (see in-channel copy); clash.png on defense; finale asset on resolution.
+        - Keish proc: announcement embed + keish_energy.gif; windowed snag/saddle titles on further catches.
+        - Zay proc: standalone event (no duck this command); zay_energy.gif; clash.png on defense; finale assets on resolution.
         - Announces catch + attributes (+ theft mention) and cooldown message.
         """
         # Restrict execution to the ducks channel
@@ -878,7 +876,7 @@ class DuckManager(commands.Cog, name="DuckManager"):
 
             new_owner_id = str(ctx.author.id)
             if self.zay.active(new_owner_id):
-                protected = random.randint(1, 3)
+                protected = random.randint(1, 4)
                 self.zay.add_protected(new_owner_id, protected)
                 rem_disp = self.zay.remaining_display(new_owner_id)
                 def_embed = discord.Embed(
@@ -901,6 +899,32 @@ class DuckManager(commands.Cog, name="DuckManager"):
             on_cd, remaining = self._check_on_cooldown(str(ctx.author.id))
             if on_cd:
                 await ctx.reply(f"⏳ You’re still recovering! Next catch in **{_fmt_duration(remaining)}**.")
+                return
+
+            # Zay's ENERGY proc: standalone event (no boot/catch/steal this command), like Keish's own card + GIF.
+            if (
+                ctx.guild
+                and not self.zay.active(new_owner_id)
+                and not self.keish.active(new_owner_id)
+                and random.random() < ZAY_ENERGY_PROB
+            ):
+                self.zay.start(new_owner_id, ctx.guild.id, ctx.channel.id)
+                cd_msg = cd_message_proc()
+                embed = discord.Embed(
+                    title=ZAY_PROC_TITLE,
+                    description=zay_proc_description(),
+                    color=discord.Color.dark_purple(),
+                )
+                zay_energy_file = None
+                if ZAY_ENERGY_GIF_PATH.is_file():
+                    zay_energy_file = discord.File(ZAY_ENERGY_GIF_PATH, filename="zay_energy.gif")
+                    embed.set_image(url="attachment://zay_energy.gif")
+                embed.set_footer(text=cd_msg)
+                self._update_cooldown(new_owner_id)
+                if zay_energy_file:
+                    await ctx.reply(embed=embed, file=zay_energy_file, mention_author=False)
+                else:
+                    await ctx.reply(embed=embed, mention_author=False)
                 return
 
             theft_text = ""
@@ -974,19 +998,12 @@ class DuckManager(commands.Cog, name="DuckManager"):
                 self._add_duck_to_user(new_owner_id, duck_id)
                 self._set_duck_owner(duck_id, new_owner_id)
 
-            # 4) Keish blessing (1%; never while Zay's Energy is active), Zay's Energy (1%, mutually exclusive on this catch) + cooldown
+            # 4) Keish blessing (never while Zay's Energy is active)
             is_blessing_proc = random.random() < BLESSING_PROB and not self.zay.active(new_owner_id)
             if is_blessing_proc:
                 self.keish.grant(new_owner_id)
 
-            is_zay_proc = False
-            if not is_blessing_proc and ctx.guild:
-                is_zay_proc = random.random() < ZAY_ENERGY_PROB
-                if is_zay_proc:
-                    self.zay.start(new_owner_id, ctx.guild.id, ctx.channel.id)
-
             blessing_now = self.keish.active(new_owner_id)
-            zay_now = self.zay.active(new_owner_id)
             if blessing_now:
                 if is_blessing_proc:
                     cd_msg = (
@@ -996,12 +1013,6 @@ class DuckManager(commands.Cog, name="DuckManager"):
                 else:
                     rem_disp = self.keish.remaining_display(new_owner_id)
                     cd_msg = f"✨ Keish's ENERGY active—**{rem_disp}s** left; **no `!duck` cooldown** until it ends."
-            elif zay_now:
-                if is_zay_proc:
-                    cd_msg = cd_message_proc()
-                else:
-                    rem_disp = self.zay.remaining_display(new_owner_id)
-                    cd_msg = cd_message_active(rem_disp)
             else:
                 cd = self._update_cooldown(new_owner_id)
                 cd_msg = (
@@ -1018,28 +1029,15 @@ class DuckManager(commands.Cog, name="DuckManager"):
 
             flair = RARITY_CATCH_FLAIR[rarity]
 
-            # Keish proc: title + description + blessing.gif + footer only (no duck stats).
+            # Keish proc: title + description + keish_energy.gif + footer only (no duck stats).
             if is_blessing_proc:
                 color = discord.Color.gold()
                 title = KEISH_PROC_TITLE
                 catch_body = blessing_proc_description()
-            elif is_zay_proc:
-                color = discord.Color.dark_purple()
-                title = ZAY_PROC_TITLE
-                catch_body = zay_proc_description()
             elif blessing_now:
                 # Blessing window: full duck card with Keish-themed titles.
                 color = RARITY_EMBED_COLORS.get(rarity, discord.Color.dark_grey())
                 title = KEISH_SADDLE_TITLE if shiny else KEISH_SNAG_TITLE
-                catch_body = (
-                    f"{flair}\n\n"
-                    f"**Name:** {name}\n"
-                    f"**Rarity:** {rarity}{' ✨' if shiny else ''}\n"
-                    f"**Stats:** ⚔️ {atk}  🛡️ {dfs}  💨 {spd}\n"
-                )
-            elif zay_now:
-                color = RARITY_EMBED_COLORS.get(rarity, discord.Color.dark_grey())
-                title = ZAY_SADDLE_TITLE if shiny else ZAY_SNAG_TITLE
                 catch_body = (
                     f"{flair}\n\n"
                     f"**Name:** {name}\n"
@@ -1064,21 +1062,20 @@ class DuckManager(commands.Cog, name="DuckManager"):
                 description=catch_body,
                 color=color,
             )
-            blessing_file = None
-            if is_blessing_proc and BLESSING_ASSET_PATH.is_file():
-                blessing_file = discord.File(BLESSING_ASSET_PATH, filename="blessing.gif")
-                embed.set_image(url="attachment://blessing.gif")
+            keish_energy_file = None
+            if is_blessing_proc and KEISH_ENERGY_GIF_PATH.is_file():
+                keish_energy_file = discord.File(KEISH_ENERGY_GIF_PATH, filename="keish_energy.gif")
+                embed.set_image(url="attachment://keish_energy.gif")
             else:
                 embed.set_image(url=duck_row["url"])
 
             embed.set_footer(text=cd_msg)
 
-            if blessing_file:
-                await ctx.reply(embed=embed, file=blessing_file, mention_author=False)
+            if keish_energy_file:
+                await ctx.reply(embed=embed, file=keish_energy_file, mention_author=False)
             else:
                 await ctx.reply(embed=embed, mention_author=False)
             if theft_text:
-                # Follow-up line in the same reply block (append text)
                 await ctx.send(theft_text)
 
         except asyncio.CancelledError:
