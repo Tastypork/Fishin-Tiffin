@@ -20,10 +20,11 @@ Standalone Discord bot containing all duck gameplay capabilities extracted from 
 
 ## Project Layout
 
-- `main.py` - entry point
-- `bot.py` - bot bootstrap and config loading
-- `duck_manager.py` - extracted duck cog
-- `duck_data/` - SQLite + generated HTML + name pools
+- `main.py` - entry point (runs `fishin_tiffin.bot`)
+- `fishin_tiffin/` - application package (`bot.py`, `duck_manager.py` cog, energy helpers, HTML generator, paths)
+- `post_duck_role_message.py` - thin wrapper → `python -m fishin_tiffin.post_duck_role_message` also works
+- `duck_data/` - SQLite + generated HTML + name pools (repo root)
+- `assets/` - GIF/PNG assets (repo root; paths resolved via `fishin_tiffin/paths.py`)
 - `config.yml` - local runtime config (token + optional server + ducks channel + optional roles/duck role)
 
 ## Setup
@@ -49,7 +50,7 @@ Use this one-time helper to manually post the onboarding message:
 - If `channel_id` is omitted, it posts in `roles_channel` when set, otherwise `ducks_channel`.
 - The message includes a short game explainer and auto-adds the `🦆` reaction.
 
-The bot listeners in `duck_manager.py` will then add/remove the role when users add/remove that reaction.
+The bot listeners in `fishin_tiffin/duck_manager.py` will then add/remove the role when users add/remove that reaction.
 If `roles_channel` is set, only reactions in that channel are processed.
 
 ## Notes
