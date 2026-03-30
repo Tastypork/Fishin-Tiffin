@@ -15,7 +15,6 @@ from .duck_dashboard_html import generate_duck_dashboard_html
 from .duck_clock import utc_ts
 from .keish_energy import (
     BLESSING_DISPLAY_SECONDS,
-    BLESSING_PROB,
     KEISH_ENERGY_GIF_PATH,
     KEISH_PROC_TITLE,
     KEISH_SADDLE_TITLE,
@@ -28,7 +27,6 @@ from .zay_energy import (
     CLASH_ASSET_PATH,
     DEFENSE_EMBED_TITLE,
     ZAY_ENERGY_GIF_PATH,
-    ZAY_ENERGY_PROB,
     ZAY_PROC_TITLE,
     ZayEnergy,
     cd_message_proc,
@@ -79,13 +77,22 @@ RARITY_CATCH_FLAIR = {
 
 # Shiny cosmetic chance (%)
 SHINY_PROB = 1.0
-BOOT_CATCH_PROB = 0.03
 BOOT_IMAGE_URLS = [
     "https://preview.redd.it/weinbrenner-boots-or-boot-singular-from-the-50s-or-60s-v0-yvf5l7k7pc9a1.jpg?width=1080&crop=smart&auto=webp&s=bde8de1772b2ee55dce93d784148a4f6dbebaf20",
     "https://images.nms.ac.uk/production/Images/Discover/Boots-not-made-for-walking-a-rare-pair-of-Jack-boots/2025-07-14-Jack-boot.jpg?w=1200&h=900&q=100&auto=format&fit=crop&crop=focalpoint&fp-x=0.5016&fp-y=0.6521&dm=1754643787&s=c5260198a2704eedb5c2b5965e4be19b",
     "https://preview.free3d.com/img/2019/07/2273113531614233936/tsko21nn.jpg",
     "https://cdn.pixabay.com/photo/2015/10/29/21/28/boot-1013034_1280.jpg",
     "https://seaofthieves.wiki.gg/images/Old_Boot.png",
+]
+
+# Primary `!duck` outcome weights (percent-like relative weights).
+# Keep these explicit so event chances are transparent and easy to extend.
+DUCK_OUTCOME_WEIGHTS = [
+    ("zay_proc", 1),
+    ("keish_proc", 1),
+    ("boot", 3),
+    ("steal", 15),
+    ("new_duck", 80),
 ]
 
 # Cooldown parameters
@@ -162,8 +169,17 @@ def _roll_stat(rarity: str) -> int:
 def _roll_shiny() -> bool:
     return random.uniform(0, 100) < SHINY_PROB
 
-def _roll_boot() -> bool:
-    return random.random() < BOOT_CATCH_PROB
+def _roll_duck_outcome(*, allow_zay_proc: bool, allow_keish_proc: bool) -> str:
+    labels = []
+    weights = []
+    for label, weight in DUCK_OUTCOME_WEIGHTS:
+        if label == "zay_proc" and not allow_zay_proc:
+            continue
+        if label == "keish_proc" and not allow_keish_proc:
+            continue
+        labels.append(label)
+        weights.append(weight)
+    return random.choices(labels, weights=weights, k=1)[0]
 
 
 def _pick_boot_image_url() -> str:
@@ -901,13 +917,19 @@ class DuckManager(commands.Cog, name="DuckManager"):
                 await ctx.reply(f"⏳ You’re still recovering! Next catch in **{_fmt_duration(remaining)}**.")
                 return
 
-            # Zay's ENERGY proc: standalone event (no boot/catch/steal this command), like Keish's own card + GIF.
-            if (
+            allow_zay_proc = (
                 ctx.guild
                 and not self.zay.active(new_owner_id)
                 and not self.keish.active(new_owner_id)
-                and random.random() < ZAY_ENERGY_PROB
-            ):
+            )
+            allow_keish_proc = not self.zay.active(new_owner_id) and not self.keish.active(new_owner_id)
+            outcome = _roll_duck_outcome(
+                allow_zay_proc=bool(allow_zay_proc),
+                allow_keish_proc=allow_keish_proc,
+            )
+
+            # Zay's ENERGY proc: standalone event (no boot/catch/steal this command), like Keish's own card + GIF.
+            if outcome == "zay_proc":
                 self.zay.start(new_owner_id, ctx.guild.id, ctx.channel.id)
                 cd_msg = cd_message_proc()
                 embed = discord.Embed(
@@ -927,10 +949,33 @@ class DuckManager(commands.Cog, name="DuckManager"):
                     await ctx.reply(embed=embed, mention_author=False)
                 return
 
+            # Keish's ENERGY proc: standalone event (no boot/catch/steal this command).
+            if outcome == "keish_proc":
+                self.keish.grant(new_owner_id)
+                cd_msg = (
+                    f"✨ **Keish's ENERGY** lasts **{BLESSING_DISPLAY_SECONDS} seconds**—`!duck` ignores cooldown until it fades. "
+                    "Your next catch after that sets a normal cooldown."
+                )
+                embed = discord.Embed(
+                    title=KEISH_PROC_TITLE,
+                    description=blessing_proc_description(),
+                    color=discord.Color.gold(),
+                )
+                keish_energy_file = None
+                if KEISH_ENERGY_GIF_PATH.is_file():
+                    keish_energy_file = discord.File(KEISH_ENERGY_GIF_PATH, filename="keish_energy.gif")
+                    embed.set_image(url="attachment://keish_energy.gif")
+                embed.set_footer(text=cd_msg)
+                if keish_energy_file:
+                    await ctx.reply(embed=embed, file=keish_energy_file, mention_author=False)
+                else:
+                    await ctx.reply(embed=embed, mention_author=False)
+                return
+
             theft_text = ""
 
-            # 2) 3% chance to reel in an old boot (does not count as a backend catch)
-            if _roll_boot():
+            # 2) Boot outcome (does not count as a backend catch)
+            if outcome == "boot":
                 boot_flair = random.choice(
                     [
                         "You yank your line up triumphantly... and it's an old boot. The silence is deafening.",
@@ -955,8 +1000,8 @@ class DuckManager(commands.Cog, name="DuckManager"):
                 await ctx.reply(embed=embed, mention_author=False)
                 return
 
-            # 3) 15% chance to steal vs 65% chance to create new duck
-            will_steal = random.random() < 0.15
+            # 3) Steal outcome vs fresh new duck
+            will_steal = outcome == "steal"
             steal_result = None
             if will_steal:
                 steal_result = self._get_random_user_with_stealable_ducks(exclude_user_id=new_owner_id)
@@ -998,21 +1043,11 @@ class DuckManager(commands.Cog, name="DuckManager"):
                 self._add_duck_to_user(new_owner_id, duck_id)
                 self._set_duck_owner(duck_id, new_owner_id)
 
-            # 4) Keish blessing (never while Zay's Energy is active)
-            is_blessing_proc = random.random() < BLESSING_PROB and not self.zay.active(new_owner_id)
-            if is_blessing_proc:
-                self.keish.grant(new_owner_id)
-
+            # 4) Keish blessing window (from a prior proc)
             blessing_now = self.keish.active(new_owner_id)
             if blessing_now:
-                if is_blessing_proc:
-                    cd_msg = (
-                        f"✨ **Keish's ENERGY** lasts **{BLESSING_DISPLAY_SECONDS} seconds**—`!duck` ignores cooldown until it fades. "
-                        "Your next catch after that sets a normal cooldown."
-                    )
-                else:
-                    rem_disp = self.keish.remaining_display(new_owner_id)
-                    cd_msg = f"✨ Keish's ENERGY active—**{rem_disp}s** left; **no `!duck` cooldown** until it ends."
+                rem_disp = self.keish.remaining_display(new_owner_id)
+                cd_msg = f"✨ Keish's ENERGY active—**{rem_disp}s** left; **no `!duck` cooldown** until it ends."
             else:
                 cd = self._update_cooldown(new_owner_id)
                 cd_msg = (
@@ -1029,12 +1064,7 @@ class DuckManager(commands.Cog, name="DuckManager"):
 
             flair = RARITY_CATCH_FLAIR[rarity]
 
-            # Keish proc: title + description + keish_energy.gif + footer only (no duck stats).
-            if is_blessing_proc:
-                color = discord.Color.gold()
-                title = KEISH_PROC_TITLE
-                catch_body = blessing_proc_description()
-            elif blessing_now:
+            if blessing_now:
                 # Blessing window: full duck card with Keish-themed titles.
                 color = RARITY_EMBED_COLORS.get(rarity, discord.Color.dark_grey())
                 title = KEISH_SADDLE_TITLE if shiny else KEISH_SNAG_TITLE
@@ -1062,19 +1092,11 @@ class DuckManager(commands.Cog, name="DuckManager"):
                 description=catch_body,
                 color=color,
             )
-            keish_energy_file = None
-            if is_blessing_proc and KEISH_ENERGY_GIF_PATH.is_file():
-                keish_energy_file = discord.File(KEISH_ENERGY_GIF_PATH, filename="keish_energy.gif")
-                embed.set_image(url="attachment://keish_energy.gif")
-            else:
-                embed.set_image(url=duck_row["url"])
+            embed.set_image(url=duck_row["url"])
 
             embed.set_footer(text=cd_msg)
 
-            if keish_energy_file:
-                await ctx.reply(embed=embed, file=keish_energy_file, mention_author=False)
-            else:
-                await ctx.reply(embed=embed, mention_author=False)
+            await ctx.reply(embed=embed, mention_author=False)
             if theft_text:
                 await ctx.send(theft_text)
 

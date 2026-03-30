@@ -19,8 +19,8 @@ LOGGER = logging.getLogger("fishin_tiffin.ducks")
 ZAY_ENERGY_PROB = 0.01
 ZAY_DURATION_SECONDS = BLESSING_DURATION_SECONDS
 ZAY_DISPLAY_SECONDS = BLESSING_DISPLAY_SECONDS
-ZAY_STEAL_TICK_SECONDS = 2
-ZAY_STEAL_TICK_COUNT = ZAY_DURATION_SECONDS // ZAY_STEAL_TICK_SECONDS
+ZAY_STEAL_TOTAL_MIN = 15
+ZAY_STEAL_TOTAL_MAX = 35
 
 CLASH_ASSET_PATH = ASSETS_DIR / "clash.png"
 ZAY_ENERGY_GIF_PATH = ASSETS_DIR / "zay_energy.gif"
@@ -142,11 +142,9 @@ class ZayEnergy:
 
     async def _run_steal_ticks(self, user_id: str) -> None:
         try:
-            for _ in range(ZAY_STEAL_TICK_COUNT):
-                await asyncio.sleep(ZAY_STEAL_TICK_SECONDS)
-                if user_id not in self._until:
-                    return
-                self._stolen[user_id] = self._stolen.get(user_id, 0) + random.randint(1, 2)
+            await asyncio.sleep(ZAY_DURATION_SECONDS)
+            if user_id not in self._until:
+                return
         except asyncio.CancelledError:
             self._tasks.pop(user_id, None)
             self._clear_user(user_id, cancel_task=False)
@@ -160,7 +158,9 @@ class ZayEnergy:
             return
 
         guild_id, channel_id = self._channel[user_id]
-        stolen = self._stolen.get(user_id, 0)
+        # Single-roll final steal budget for the full event.
+        stolen = random.randint(ZAY_STEAL_TOTAL_MIN, ZAY_STEAL_TOTAL_MAX)
+        self._stolen[user_id] = stolen
         protected = self._protected.get(user_id, 0)
         self._until.pop(user_id, None)
         net = max(0, stolen - protected)
