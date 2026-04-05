@@ -22,17 +22,13 @@ from .keish_energy import (
     KeishEnergy,
     blessing_proc_description,
 )
-from .paths import DUCK_DATA_DIR, HTML_DIR
+from .paths import ASSETS_DIR, DUCK_DATA_DIR, HTML_DIR
 from .zay_energy import (
-    CLASH_ASSET_PATH,
-    DEFENSE_EMBED_TITLE,
     ZAY_ENERGY_GIF_PATH,
     ZAY_PROC_TITLE,
     ZayEnergy,
-    cd_message_proc,
-    defense_embed_body,
-    defense_embed_footer,
     zay_proc_description,
+    zay_proc_footer,
 )
 
 LOGGER = logging.getLogger("fishin_tiffin.ducks")
@@ -88,11 +84,11 @@ BOOT_IMAGE_URLS = [
 # Primary `!duck` outcome weights (percent-like relative weights).
 # Keep these explicit so event chances are transparent and easy to extend.
 DUCK_OUTCOME_WEIGHTS = [
-    ("zay_proc", 1),
+    ("zay_proc", 0.5),
     ("keish_proc", 1),
     ("boot", 3),
     ("steal", 15),
-    ("new_duck", 80),
+    ("new_duck", 80.5),
 ]
 
 # Cooldown parameters
@@ -169,13 +165,16 @@ def _roll_stat(rarity: str) -> int:
 def _roll_shiny() -> bool:
     return random.uniform(0, 100) < SHINY_PROB
 
-def _roll_duck_outcome(*, allow_zay_proc: bool, allow_keish_proc: bool) -> str:
+
+def _roll_duck_outcome(*, allow_zay_proc: bool, allow_keish_proc: bool, allow_boot: bool) -> str:
     labels = []
     weights = []
     for label, weight in DUCK_OUTCOME_WEIGHTS:
         if label == "zay_proc" and not allow_zay_proc:
             continue
         if label == "keish_proc" and not allow_keish_proc:
+            continue
+        if label == "boot" and not allow_boot:
             continue
         labels.append(label)
         weights.append(weight)
@@ -233,7 +232,7 @@ def build_duck_onboarding_embed(role_mention: str) -> discord.Embed:
             "- Catches roll rarity and stats; some ducks are extra special.\n"
             "- `!duck` has a randomized cooldown per successful catch.\n"
             "- Sometimes your `!duck` steals one from another player.\n"
-            "- If **Zay** shows up, he's **actively stealing your ducks**—spam **`!duck`** to defend.\n\n"
+            "- If **Zay** shows up, **`!duck`** up to **three times** to defend your flock (he leaves after a failed block).\n\n"
             "- If **Keish** shows up, she's **giving you a boost**—spam **`!duck`** to keep the energy going.\n\n"
             "**Rarities**\n"
             "- From **Common** up to **Mythic**—the higher tiers show up less often.\n\n"
@@ -244,9 +243,7 @@ def build_duck_onboarding_embed(role_mention: str) -> discord.Embed:
     return embed
 
 
-DUCK_TYPO_TENOR_URL = (
-    "https://tenor.com/view/dap-dap-up-israel-adesanya-francis-ngannou-gif-8323814478209239667"
-)
+DUCK_TYPO_GIF_PATH = ASSETS_DIR / "dap.gif"
 
 
 def _levenshtein(a: str, b: str) -> int:
@@ -346,8 +343,10 @@ class DuckManager(commands.Cog, name="DuckManager"):
         ctx = await self.bot.get_context(message)
         if not await self.cog_check(ctx):
             return
+        typo_gif_file = discord.File(DUCK_TYPO_GIF_PATH, filename="dap.gif")
         await message.reply(
-            f"{message.author.mention} dont worry fam i got you\n{DUCK_TYPO_TENOR_URL}",
+            f"{message.author.mention} dont worry fam i got you",
+            file=typo_gif_file,
             mention_author=False,
         )
         try:
@@ -857,9 +856,9 @@ class DuckManager(commands.Cog, name="DuckManager"):
                 "- If someone steals from you, catching a duck soon after can trigger revenge-steal.\n"
                 "- **Keish's ENERGY**: a rare burst where `!duck` ignores cooldown for a short time "
                 "(see the in-channel card; can't overlap **Zay's ENERGY**).\n"
-                "- **Zay's ENERGY**: a rare moment when **Zay is actively stealing your ducks**—you get **no `!duck` cooldown** "
-                "so you can **`!duck`** again and again to **drive him off**. "
-                "**Legendary** and **Mythic** ducks are never lost to him.\n\n"
+                "- **Zay's ENERGY**: a rare clash where **Zay tries to snatch ducks** from your collection. "
+                "Use **`!duck`** up to **three times** to defend—**each roll either holds him off or he grabs his take and leaves**. "
+                "Only non–Legendary / non–Mythic ducks can be lost.\n\n"
                 "**Commands**\n"
                 f"{chr(10).join(commands_lines)}"
             ),
@@ -874,7 +873,7 @@ class DuckManager(commands.Cog, name="DuckManager"):
         Catch a duck via the Duck API.
         - Each catch creates or steals a duck; per-user cooldown unless Keish's or Zay's ENERGY is active.
         - Keish proc: announcement embed + keish_energy.gif; windowed snag/saddle titles on further catches.
-        - Zay proc: standalone event (no duck this command); zay_energy.gif; clash.png on defense; finale assets on resolution.
+        - Zay proc: standalone event (no duck this command); zay_energy.gif; up to three !duck defenses; clash / finale assets.
         - Announces catch + attributes (+ theft mention) and cooldown message.
         """
         # Restrict execution to the ducks channel
@@ -892,23 +891,7 @@ class DuckManager(commands.Cog, name="DuckManager"):
 
             new_owner_id = str(ctx.author.id)
             if self.zay.active(new_owner_id):
-                protected = random.randint(1, 4)
-                self.zay.add_protected(new_owner_id, protected)
-                rem_disp = self.zay.remaining_display(new_owner_id)
-                def_embed = discord.Embed(
-                    title=DEFENSE_EMBED_TITLE,
-                    description=defense_embed_body(protected),
-                    color=discord.Color.orange(),
-                )
-                clash_file = None
-                if CLASH_ASSET_PATH.is_file():
-                    clash_file = discord.File(CLASH_ASSET_PATH, filename="clash.png")
-                    def_embed.set_image(url="attachment://clash.png")
-                def_embed.set_footer(text=defense_embed_footer(rem_disp))
-                if clash_file:
-                    await ctx.reply(embed=def_embed, file=clash_file, mention_author=False)
-                else:
-                    await ctx.reply(embed=def_embed, mention_author=False)
+                await self.zay.handle_defense_attempt(ctx, new_owner_id)
                 return
 
             # 1) cooldown pre-check
@@ -923,15 +906,16 @@ class DuckManager(commands.Cog, name="DuckManager"):
                 and not self.keish.active(new_owner_id)
             )
             allow_keish_proc = not self.zay.active(new_owner_id) and not self.keish.active(new_owner_id)
+            keish_energy_now = self.keish.active(new_owner_id)
             outcome = _roll_duck_outcome(
                 allow_zay_proc=bool(allow_zay_proc),
                 allow_keish_proc=allow_keish_proc,
+                allow_boot=not keish_energy_now,
             )
 
             # Zay's ENERGY proc: standalone event (no boot/catch/steal this command), like Keish's own card + GIF.
             if outcome == "zay_proc":
                 self.zay.start(new_owner_id, ctx.guild.id, ctx.channel.id)
-                cd_msg = cd_message_proc()
                 embed = discord.Embed(
                     title=ZAY_PROC_TITLE,
                     description=zay_proc_description(),
@@ -941,7 +925,7 @@ class DuckManager(commands.Cog, name="DuckManager"):
                 if ZAY_ENERGY_GIF_PATH.is_file():
                     zay_energy_file = discord.File(ZAY_ENERGY_GIF_PATH, filename="zay_energy.gif")
                     embed.set_image(url="attachment://zay_energy.gif")
-                embed.set_footer(text=cd_msg)
+                embed.set_footer(text=zay_proc_footer())
                 self._update_cooldown(new_owner_id)
                 if zay_energy_file:
                     await ctx.reply(embed=embed, file=zay_energy_file, mention_author=False)
@@ -1096,7 +1080,12 @@ class DuckManager(commands.Cog, name="DuckManager"):
 
             embed.set_footer(text=cd_msg)
 
-            await ctx.reply(embed=embed, mention_author=False)
+            catch_message = await ctx.reply(embed=embed, mention_author=False)
+            if rarity in ("Legendary", "Mythic"):
+                try:
+                    await catch_message.add_reaction("👑")
+                except discord.HTTPException:
+                    pass
             if theft_text:
                 await ctx.send(theft_text)
 

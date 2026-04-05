@@ -1,75 +1,66 @@
 """
-Zay's ENERGY — defense event with backend tally and finale resolution.
+Zay's ENERGY — up to three sequential !duck defenses; first failure ends the event.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
+import math
 import random
 import sqlite3
+from pathlib import Path
+
 import discord
 
-from .duck_clock import utc_ts
-from .keish_energy import BLESSING_DISPLAY_SECONDS, BLESSING_DURATION_SECONDS
 from .paths import ASSETS_DIR
 
 LOGGER = logging.getLogger("fishin_tiffin.ducks")
 
-ZAY_ENERGY_PROB = 0.01
-ZAY_DURATION_SECONDS = BLESSING_DURATION_SECONDS
-ZAY_DISPLAY_SECONDS = BLESSING_DISPLAY_SECONDS
-ZAY_STEAL_TOTAL_MIN = 15
-ZAY_STEAL_TOTAL_MAX = 35
+# Proc frequency: see duck_manager.DUCK_OUTCOME_WEIGHTS ("zay_proc", 0.5 of 100).
+ZAY_DEFENSE_PROBS = (0.9, 0.7, 0.5)
 
 CLASH_ASSET_PATH = ASSETS_DIR / "clash.png"
 ZAY_ENERGY_GIF_PATH = ASSETS_DIR / "zay_energy.gif"
-# Finale: file names match art — steal outcome vs defended outcome
-ZAY_FINALE_WHEN_STOLE_ASSET_PATH = ASSETS_DIR / "zay_success.png"  # Zay got ducks
-ZAY_FINALE_WHEN_DEFENDED_ASSET_PATH = ASSETS_DIR / "zay_defeat.png"  # no ducks lost
+ZAY_FINALE_WHEN_STOLE_ASSET_PATH = ASSETS_DIR / "zay_success.png"
+ZAY_FINALE_WHEN_DEFENDED_ASSET_PATH = ASSETS_DIR / "zay_defeat.png"
 
-ZAY_PROC_TITLE = "ZAY IS STEALING YOUR DUCKS — USE `!DUCK` TO DEFEND!!!"
-ZAY_SNAG_TITLE = "🌑 New duck—but **Zay is stealing your flock!** **`!duck`** to defend!"
-ZAY_SADDLE_TITLE = "🌑✨ Shiny secured—**Zay's still stealing your ducks!** **`!duck`** to fight back!"
+ZAY_PROC_TITLE = "ZAY IS COMING FOR YOUR FLOCK — USE `!DUCK` TO DEFEND"
 
-DEFENSE_EMBED_TITLE = "⚔️ You fought him off!"
+ZAY_MID_DEFENSE_TITLE = "Good defense! He's coming in for another attack"
+
+ZAY_STEAL_FINALE_TITLE = "Zay stole from your flock…"
+ZAY_FULL_DEFENSE_TITLE = "You drove him off!"
 
 
 def zay_proc_description() -> str:
     return (
-        "**Zay is actively stealing your ducks.** "
-        f"For **{ZAY_DISPLAY_SECONDS}** seconds, **`!duck` has no cooldown**—"
-        "**use `!duck`** again and again to **defend** and stop him from walking out with your birds. "
-        "He **cannot** take **Legendary** or **Mythic** ducks."
+        "Zay is trying to snatch birds from your collection. Use `!duck` to fight him off. "
+        "A strong defense protects your ducks from thievery! "
+        "**Legendary** and **Mythic** ducks are never on the table."
     )
 
 
-def defense_embed_body(protected: int) -> str:
+def zay_proc_footer() -> str:
+    return "He's picking targets from ducks he can actually take — stand your ground with `!duck`."
+
+
+def zay_mid_defense_description() -> str:
     return (
-        f"**You used `!duck`** and kept **{protected}** ducks out of his reach—"
-        "**Zay is still stealing from your flock.** Don't stop now."
+        "You protected some of your ducks but he's still lurking, use `!duck` again to fend him off!"
     )
 
 
-def defense_embed_footer(rem_disp: int) -> str:
-    return (
-        f"🌑 **Zay is actively stealing your ducks**—**{rem_disp}s** left. "
-        "**Use `!duck`** to keep defending."
-    )
+def zay_mid_defense_footer() -> str:
+    return "You got this, `!duck` to protect your ducks again!"
 
 
-def cd_message_proc() -> str:
-    return (
-        f"🌑 **Zay is actively stealing your ducks** for **{ZAY_DISPLAY_SECONDS}** seconds. "
-        "**No `!duck` cooldown—use `!duck`** over and over to defend your flock."
-    )
-
-
-def cd_message_active(rem_disp: int) -> str:
-    return (
-        f"🌑 **Zay is still stealing your ducks**—**{rem_disp}s** left. "
-        "**No `!duck` cooldown—keep using `!duck`** to defend."
-    )
+def _steal_budget_for_round(round_index: int, snapshot_n: int) -> int:
+    """round_index is 1..3; snapshot_n is loss-eligible count at event start."""
+    if round_index == 1:
+        return 6 + math.ceil(0.01 * snapshot_n)
+    if round_index == 2:
+        return 3 + math.ceil(0.005 * snapshot_n)
+    return 1 + math.ceil(0.0025 * snapshot_n)
 
 
 def _is_loss_eligible(duck_row: sqlite3.Row | None) -> bool:
@@ -79,46 +70,24 @@ def _is_loss_eligible(duck_row: sqlite3.Row | None) -> bool:
 
 
 class ZayEnergy:
-    """Runtime state and asyncio task for Zay's Energy."""
+    """In-memory Zay encounter: three ordered defense rolls, no background tasks."""
 
-    __slots__ = ("_bot", "_cog", "_until", "_stolen", "_protected", "_tasks", "_channel")
+    __slots__ = ("_bot", "_cog", "_channel", "_next_round", "_snapshot_n")
 
     def __init__(self, bot: discord.Client, duck_cog: object) -> None:
         self._bot = bot
         self._cog = duck_cog
-        self._until: dict[str, int] = {}
-        self._stolen: dict[str, int] = {}
-        self._protected: dict[str, int] = {}
-        self._tasks: dict[str, asyncio.Task] = {}
         self._channel: dict[str, tuple[int, int]] = {}
+        self._next_round: dict[str, int] = {}
+        self._snapshot_n: dict[str, int] = {}
 
     def active(self, user_id: str) -> bool:
-        until = self._until.get(user_id)
-        if until is None:
-            return False
-        return utc_ts() < until
+        return user_id in self._channel
 
-    def _remaining(self, user_id: str) -> int:
-        until = self._until.get(user_id)
-        if until is None:
-            return 0
-        return max(0, until - utc_ts())
-
-    def remaining_display(self, user_id: str) -> int:
-        return self._remaining(user_id) // 2
-
-    def add_protected(self, user_id: str, delta: int) -> None:
-        self._protected[user_id] = self._protected.get(user_id, 0) + delta
-
-    def _clear_user(self, user_id: str, cancel_task: bool = True) -> None:
-        self._until.pop(user_id, None)
-        self._stolen.pop(user_id, None)
-        self._protected.pop(user_id, None)
+    def _clear_user(self, user_id: str) -> None:
         self._channel.pop(user_id, None)
-        if cancel_task:
-            t = self._tasks.pop(user_id, None)
-            if t and not t.done():
-                t.cancel()
+        self._next_round.pop(user_id, None)
+        self._snapshot_n.pop(user_id, None)
 
     def _loss_eligible_duck_ids(self, user_id: str) -> list[str]:
         out: list[str] = []
@@ -131,42 +100,110 @@ class ZayEnergy:
         return out
 
     def start(self, user_id: str, guild_id: int, channel_id: int) -> None:
-        self._clear_user(user_id, cancel_task=True)
-        now = utc_ts()
-        self._until[user_id] = now + ZAY_DURATION_SECONDS
-        self._stolen[user_id] = 0
-        self._protected[user_id] = 0
+        self._clear_user(user_id)
+        self._snapshot_n[user_id] = len(self._loss_eligible_duck_ids(user_id))
+        self._next_round[user_id] = 1
         self._channel[user_id] = (guild_id, channel_id)
-        task = asyncio.create_task(self._run_steal_ticks(user_id))
-        self._tasks[user_id] = task
 
-    async def _run_steal_ticks(self, user_id: str) -> None:
+    def cancel_all_tasks(self) -> None:
+        """Clear every active encounter. Name kept for duck_manager.cog_unload compatibility."""
+        for uid in list(self._channel.keys()):
+            self._clear_user(uid)
+
+    def _resolve_channel(self, guild_id: int, channel_id: int) -> discord.abc.Messageable | None:
+        ch = self._bot.get_channel(channel_id)
+        if ch is not None and isinstance(ch, discord.abc.Messageable):
+            return ch
+        guild = self._bot.get_guild(guild_id)
+        if guild is None:
+            return None
+        fallback = guild.get_channel(channel_id)
+        return fallback if isinstance(fallback, discord.abc.Messageable) else None
+
+    @staticmethod
+    def _mention_for_user(channel: discord.abc.Messageable, user_id: str) -> str:
         try:
-            await asyncio.sleep(ZAY_DURATION_SECONDS)
-            if user_id not in self._until:
-                return
-        except asyncio.CancelledError:
-            self._tasks.pop(user_id, None)
-            self._clear_user(user_id, cancel_task=False)
-            raise
-        await self._resolve(user_id)
+            guild = getattr(channel, "guild", None)
+            if guild is not None:
+                member = guild.get_member(int(user_id))
+                if member is not None:
+                    return member.mention
+        except Exception:
+            pass
+        return f"<@{user_id}>"
 
-    async def _resolve(self, user_id: str) -> None:
+    @staticmethod
+    async def _send_finale(
+        channel: discord.abc.Messageable,
+        embed: discord.Embed,
+        image_path: Path,
+        attachment_filename: str,
+        log_tag: str,
+    ) -> None:
+        file_obj: discord.File | None = None
+        if image_path.is_file():
+            file_obj = discord.File(image_path, filename=attachment_filename)
+            embed.set_image(url=f"attachment://{attachment_filename}")
+        try:
+            if file_obj is not None:
+                await channel.send(embed=embed, file=file_obj)
+            else:
+                await channel.send(embed=embed)
+        except discord.HTTPException as e:
+            LOGGER.info("[zay] %s finale send failed: %s", log_tag, e)
+
+    async def handle_defense_attempt(self, ctx: commands.Context, user_id: str) -> None:
+        """One `!duck` resolves the current round: steal finale, full-defense finale, or clash reply."""
         if user_id not in self._channel:
-            self._tasks.pop(user_id, None)
-            self._clear_user(user_id, cancel_task=False)
             return
 
-        guild_id, channel_id = self._channel[user_id]
-        # Single-roll final steal budget for the full event.
-        stolen = random.randint(ZAY_STEAL_TOTAL_MIN, ZAY_STEAL_TOTAL_MAX)
-        self._stolen[user_id] = stolen
-        protected = self._protected.get(user_id, 0)
-        self._until.pop(user_id, None)
-        net = max(0, stolen - protected)
+        rnd = self._next_round[user_id]
+        if rnd not in (1, 2, 3):
+            LOGGER.warning("[zay] invalid round %s for user %s; clearing state", rnd, user_id)
+            self._clear_user(user_id)
+            return
 
+        snapshot_n = self._snapshot_n[user_id]
+        defend_p = ZAY_DEFENSE_PROBS[rnd - 1]
+        defended = random.random() < defend_p
+
+        if not defended:
+            await self._finish_steal(user_id, rnd, snapshot_n)
+            return
+
+        if rnd >= 3:
+            await self._finish_full_defense(user_id)
+            return
+
+        self._next_round[user_id] = rnd + 1
+        embed = discord.Embed(
+            title=ZAY_MID_DEFENSE_TITLE,
+            description=zay_mid_defense_description(),
+            color=discord.Color.orange(),
+        )
+        clash_file = None
+        if CLASH_ASSET_PATH.is_file():
+            clash_file = discord.File(CLASH_ASSET_PATH, filename="clash.png")
+            embed.set_image(url="attachment://clash.png")
+        embed.set_footer(text=zay_mid_defense_footer())
+        try:
+            if clash_file is not None:
+                await ctx.reply(embed=embed, file=clash_file, mention_author=False)
+            else:
+                await ctx.reply(embed=embed, mention_author=False)
+        except discord.HTTPException as e:
+            LOGGER.info("[zay] mid-defense reply failed: %s", e)
+
+    async def _finish_steal(
+        self,
+        user_id: str,
+        failed_round: int,
+        snapshot_n: int,
+    ) -> None:
+        guild_id, channel_id = self._channel[user_id]
+        budget = _steal_budget_for_round(failed_round, snapshot_n)
         eligible = self._loss_eligible_duck_ids(user_id)
-        remove_n = min(net, len(eligible))
+        remove_n = min(budget, len(eligible))
         lost_names: list[str] = []
         obliterate = getattr(self._cog, "_obliterate_duck")
         get_duck = getattr(self._cog, "_get_duck")
@@ -178,73 +215,74 @@ class ZayEnergy:
                     lost_names.append(str(row["name"]))
                 obliterate(user_id, duck_id)
 
-        self._tasks.pop(user_id, None)
-        self._clear_user(user_id, cancel_task=False)
+        self._clear_user(user_id)
 
-        channel = self._bot.get_channel(channel_id)
-        if channel is None:
-            try:
-                guild = self._bot.get_guild(guild_id)
-                if guild:
-                    channel = guild.get_channel(channel_id)
-            except Exception:
-                pass
+        channel = self._resolve_channel(guild_id, channel_id)
         if channel is None:
             return
 
-        try:
-            member = channel.guild.get_member(int(user_id)) if channel.guild else None
-            mention = member.mention if member else f"<@{user_id}>"
-        except Exception:
-            mention = f"<@{user_id}>"
+        mention = self._mention_for_user(channel, user_id)
+        names_bit = ""
+        if lost_names:
+            preview = ", ".join(lost_names[:8])
+            if len(lost_names) > 8:
+                preview += f", +{len(lost_names) - 8} more"
+            names_bit = f"\n\n**Taken:** {preview}"
 
-        if remove_n == 0:
-            title = "You drove him off!"
-            if net == 0:
-                desc = (
-                    f"{mention} **Your `!duck` defense worked—Zay didn't get your birds.** "
-                    "**Nobody lost a duck.**"
-                )
-            else:
-                desc = (
-                    f"{mention} **Zay was stealing**, but nothing he could take was on the table—"
-                    "**Legendary** and **Mythic** ducks are untouchable. **You're safe.**"
-                )
-            asset_path = ZAY_FINALE_WHEN_DEFENDED_ASSET_PATH
-            attach_name = "zay_defeat.png"
-        else:
-            title = "Zay stole from your flock…"
-            names_bit = ""
-            if lost_names:
-                preview = ", ".join(lost_names[:8])
-                if len(lost_names) > 8:
-                    preview += f", +{len(lost_names) - 8} more"
-                names_bit = f"\n\n**Taken:** {preview}"
+        if remove_n > 0:
             desc = (
                 f"{mention} **While he was stealing, you couldn't stop every grab.** "
                 f"**{remove_n}** duck{'s' if remove_n != 1 else ''} are gone.{names_bit}"
             )
-            asset_path = ZAY_FINALE_WHEN_STOLE_ASSET_PATH
-            attach_name = "zay_success.png"
+        else:
+            desc = (
+                f"{mention} **Zay came for your flock, but nothing he could take was on the table.** "
+                "**Legendary** and **Mythic** ducks are untouchable."
+            )
 
         embed = discord.Embed(
-            title=title,
+            title=ZAY_STEAL_FINALE_TITLE,
             description=desc,
             color=discord.Color.dark_red() if remove_n > 0 else discord.Color.green(),
         )
-        finale_file = None
-        if asset_path.is_file():
-            finale_file = discord.File(asset_path, filename=attach_name)
-            embed.set_image(url=f"attachment://{attach_name}")
-        try:
-            if finale_file:
-                await channel.send(embed=embed, file=finale_file)
-            else:
-                await channel.send(embed=embed)
-        except discord.HTTPException as e:
-            LOGGER.info("[zay] finale send failed: %s", e)
+        embed.set_footer(text="You go back to strengthen your defenses")
+        await self._send_finale(
+            channel,
+            embed,
+            ZAY_FINALE_WHEN_STOLE_ASSET_PATH,
+            "zay_success.png",
+            "steal",
+        )
 
-    def cancel_all_tasks(self) -> None:
-        for t in list(self._tasks.values()):
-            t.cancel()
-        self._tasks.clear()
+    async def _finish_full_defense(self, user_id: str) -> None:
+        guild_id, channel_id = self._channel[user_id]
+        snapshot_n = self._snapshot_n[user_id]
+        self._clear_user(user_id)
+
+        channel = self._resolve_channel(guild_id, channel_id)
+        if channel is None:
+            return
+
+        mention = self._mention_for_user(channel, user_id)
+        if snapshot_n == 0:
+            desc = (
+                f"{mention} **Three clashes, three wins** — **Zay didn't walk away with any of your birds.** "
+                "**Legendary** and **Mythic** ducks are untouchable — nothing else was on the table either."
+            )
+        else:
+            desc = (
+                f"{mention} **Three clashes, three wins — Zay didn't walk away with any of your birds.**"
+            )
+        embed = discord.Embed(
+            title=ZAY_FULL_DEFENSE_TITLE,
+            description=desc,
+            color=discord.Color.green(),
+        )
+        embed.set_footer(text="Your flock's safe — for now.")
+        await self._send_finale(
+            channel,
+            embed,
+            ZAY_FINALE_WHEN_DEFENDED_ASSET_PATH,
+            "zay_defeat.png",
+            "full-defense",
+        )
