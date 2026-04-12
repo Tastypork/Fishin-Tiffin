@@ -1,0 +1,15 @@
+# Copy to config.yml (gitignored) and fill in values.
+
+token: "your_discord_bot_token"
+ducks_channel: 0
+
+# Optional: restrict commands to one guild
+# server: 0
+
+# Optional: reaction-role onboarding (see README)
+# roles_channel: 0
+# duck_role: 0
+
+# Optional: override defaults if your duck backend is not duck.jocal.dev
+# duck_api_url: "https://your-host.example/duck"
+# duck_dashboard_base_url: "https://your-host.example/user"

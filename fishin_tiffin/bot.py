@@ -24,8 +24,10 @@ class FishinTiffin(commands.Bot):
         self.ducks = int(self.config["ducks_channel"])
         self.roles_channel = int(self.config["roles_channel"]) if self.config.get("roles_channel") else None
         self.duck_role = int(self.config["duck_role"]) if self.config.get("duck_role") else None
-        self.duck_api_url = DEFAULT_DUCK_API_URL
-        self.duck_dashboard_base_url = DEFAULT_DUCK_DASHBOARD_BASE_URL
+        self.duck_api_url = (self.config.get("duck_api_url") or DEFAULT_DUCK_API_URL).rstrip("/")
+        self.duck_dashboard_base_url = (
+            self.config.get("duck_dashboard_base_url") or DEFAULT_DUCK_DASHBOARD_BASE_URL
+        ).rstrip("/")
         self.log_level = DEFAULT_LOG_LEVEL
 
     async def setup_hook(self) -> None:
@@ -72,6 +74,13 @@ class FishinTiffin(commands.Bot):
                 int(config["duck_role"])
             except (TypeError, ValueError) as exc:
                 raise RuntimeError("Config key 'duck_role' must be a valid integer role ID.") from exc
+
+        for url_key in ("duck_api_url", "duck_dashboard_base_url"):
+            val = config.get(url_key)
+            if val is not None and (not isinstance(val, str) or not val.strip()):
+                raise RuntimeError(
+                    f"Config key '{url_key}' must be a non-empty string when set."
+                )
 
         return config
 
