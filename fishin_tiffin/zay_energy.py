@@ -16,7 +16,8 @@ from .paths import ASSETS_DIR
 
 LOGGER = logging.getLogger("fishin_tiffin.ducks")
 
-# Proc frequency: see duck_manager.DUCK_OUTCOME_WEIGHTS ("zay_proc", 0.5 of 100).
+# Proc frequency: see duck_manager.DUCK_OUTCOME_WEIGHTS ("zay_proc", 1 of 100).
+# Per-round defense success chance (rounds 1–3); first failed roll ends in a steal finale.
 ZAY_DEFENSE_PROBS = (0.9, 0.7, 0.5)
 
 CLASH_ASSET_PATH = ASSETS_DIR / "clash.png"
@@ -24,7 +25,7 @@ ZAY_ENERGY_GIF_PATH = ASSETS_DIR / "zay_energy.gif"
 ZAY_FINALE_WHEN_STOLE_ASSET_PATH = ASSETS_DIR / "zay_success.png"
 ZAY_FINALE_WHEN_DEFENDED_ASSET_PATH = ASSETS_DIR / "zay_defeat.png"
 
-ZAY_PROC_TITLE = "ZAY IS COMING FOR YOUR FLOCK — USE `!DUCK` TO DEFEND"
+ZAY_PROC_TITLE = "ZAY IS COMING FOR YOUR FLOCK"
 
 ZAY_MID_DEFENSE_TITLE = "Good defense! He's coming in for another attack"
 
@@ -34,9 +35,7 @@ ZAY_FULL_DEFENSE_TITLE = "You drove him off!"
 
 def zay_proc_description() -> str:
     return (
-        "Zay is trying to snatch birds from your collection. Use `!duck` to fight him off. "
-        "A strong defense protects your ducks from thievery! "
-        "**Legendary** and **Mythic** ducks are never on the table."
+        "Zay is trying to snatch birds from your collection. Use `!duck` to fight him off."
     )
 
 
@@ -266,13 +265,11 @@ class ZayEnergy:
         mention = self._mention_for_user(channel, user_id)
         if snapshot_n == 0:
             desc = (
-                f"{mention} **Three clashes, three wins** — **Zay didn't walk away with any of your birds.** "
+                f"{mention} **Zay couldn't steal any of your birds.** "
                 "**Legendary** and **Mythic** ducks are untouchable — nothing else was on the table either."
             )
         else:
-            desc = (
-                f"{mention} **Three clashes, three wins — Zay didn't walk away with any of your birds.**"
-            )
+            desc = f"{mention} **Zay couldn't steal any of your birds.**"
         embed = discord.Embed(
             title=ZAY_FULL_DEFENSE_TITLE,
             description=desc,

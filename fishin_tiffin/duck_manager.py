@@ -84,11 +84,11 @@ BOOT_IMAGE_URLS = [
 # Primary `!duck` outcome weights (percent-like relative weights).
 # Keep these explicit so event chances are transparent and easy to extend.
 DUCK_OUTCOME_WEIGHTS = [
-    ("zay_proc", 0.5),
+    ("zay_proc", 1),
     ("keish_proc", 1),
     ("boot", 3),
     ("steal", 15),
-    ("new_duck", 80.5),
+    ("new_duck", 80),
 ]
 
 # Cooldown parameters
@@ -926,7 +926,6 @@ class DuckManager(commands.Cog, name="DuckManager"):
                     zay_energy_file = discord.File(ZAY_ENERGY_GIF_PATH, filename="zay_energy.gif")
                     embed.set_image(url="attachment://zay_energy.gif")
                 embed.set_footer(text=zay_proc_footer())
-                self._update_cooldown(new_owner_id)
                 if zay_energy_file:
                     await ctx.reply(embed=embed, file=zay_energy_file, mention_author=False)
                 else:
