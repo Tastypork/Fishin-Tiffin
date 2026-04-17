@@ -1116,7 +1116,11 @@ class DuckManager(commands.Cog, name="DuckManager"):
 
     @commands.command(name="leaderboard")
     async def duck_leaderboard(self, ctx: commands.Context):
-        """Show the top 10 duck collectors by number of ducks owned."""
+        """Show the top 10 duck collectors among members currently in this server."""
+        if ctx.guild is None:
+            await ctx.reply("Use this command in a server to see the leaderboard.")
+            return
+
         cur = self.db.cursor()
         cur.execute("SELECT user_id, ducks_json FROM users")
         rows = cur.fetchall()
@@ -1129,12 +1133,20 @@ class DuckManager(commands.Cog, name="DuckManager"):
             total_ducks += count
             leaderboard.append((row["user_id"], count))
 
-        # Sort descending by count
+        # Sort descending by count, then keep only users still in the guild (ranks compress)
         leaderboard.sort(key=lambda x: x[1], reverse=True)
-        top10 = leaderboard[:10]
+        eligible = [
+            (user_id, count)
+            for user_id, count in leaderboard
+            if ctx.guild.get_member(int(user_id)) is not None
+        ]
+        top10 = eligible[:10]
 
         if not top10:
-            await ctx.reply("No ducks have been caught yet!")
+            if not leaderboard:
+                await ctx.reply("No ducks have been caught yet!")
+            else:
+                await ctx.reply("No collectors are currently in this server.")
             return
 
         # Build lines with medals for top 3
@@ -1142,9 +1154,9 @@ class DuckManager(commands.Cog, name="DuckManager"):
         lines = []
         for i, (user_id, count) in enumerate(top10, start=1):
             member = ctx.guild.get_member(int(user_id))
-            name = member.display_name if member else f"User {user_id}"
             medal = medals.get(i, f"{i}.")
-            lines.append(f"{medal} **{name}** — {count} duck{'s' if count != 1 else ''}")
+            duck_label = f"{count} duck{'s' if count != 1 else ''}"
+            lines.append(f"{medal} **{member.display_name}** — {duck_label}")
 
         embed = discord.Embed(
             title="🏆 Duck Leaderboard 🏆",
