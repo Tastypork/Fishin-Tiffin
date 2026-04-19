@@ -1,9 +1,12 @@
 # Environment variables
 .env
+.env.*
 
-# Build output
-dist/
-build/
+# Local bot config
+config.yml
+
+# Logs
+*.log
 
 # OS / editor noise
 .DS_Store
@@ -13,13 +16,6 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Coverage / testing
-coverage/
-
-# Runtime files
-*.pid
-*.seed
-
 # Python
 __pycache__/
 *.py[cod]
@@ -28,9 +24,11 @@ __pycache__/
 .venv/
 venv/
 
-# Local bot config/data
-config.yml
-duck_data/ducks.db
-duck_data/html/
+# Build / coverage
+dist/
+build/
+coverage/
 
-log.txt
+# Runtime
+*.pid
+*.seed

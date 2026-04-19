@@ -3,6 +3,11 @@
 token: "your_discord_bot_token"
 ducks_channel: 0
 
+# Duck-Game-backend base URL (no trailing slash). Must be the origin that serves this API -
+# see GET / on the API for {"service":"duck-game-backend"}.
+# If you use API_PREFIX=/api on the server, include it here, e.g. "https://your-host.example/api"
+duck_game_api_url: "https://api.duckgame.app"
+
 # Optional: restrict commands to one guild
 # server: 0
 
@@ -10,6 +15,12 @@ ducks_channel: 0
 # roles_channel: 0
 # duck_role: 0
 
-# Optional: override defaults if your duck backend is not duck.jocal.dev
-# duck_api_url: "https://your-host.example/duck"
-# duck_dashboard_base_url: "https://your-host.example/user"
+# Optional: links in !ducks point here (default matches Duck-Game-backend DASHBOARD_BASE_URL)
+# duck_dashboard_base_url: "https://api.duckgame.app/user"
+
+# Optional: shown in !leaderboard title (default Preseason)
+# leaderboard_season: "Preseason"
+
+# Optional: enables the web-origin announcement relay (see README).
+# Must match DUCK_GAME_API_SHARED_SECRET on the backend.
+# duck_game_api_shared_secret: ""

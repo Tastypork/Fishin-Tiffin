@@ -1,66 +1,43 @@
 # FishinTiffin
 
-Standalone Discord bot containing all duck gameplay capabilities extracted from YukiBot.
+Discord bot front-end for the duck game. **All game rules and persistence live in [Duck-Game-backend](../Duck-Game-backend)** - this package only maps API responses to Discord messages (embeds, attachments, reaction roles).
 
-## Included Duck Capabilities
+## Capabilities
 
-- `!duck` catch command with:
-  - rarity roll (`Common`, `Uncommon`, `Rare`, `Legendary`, `Mythic`)
-  - weighted stat rolls (attack, defense, speed)
-  - shiny rolls
-  - per-user randomized cooldown
-  - 35% theft mechanic (steal random duck from another user)
-- `!ducks [@member]` personal duck dashboard link generation
-- `!leaderboard` top collectors leaderboard
-- `!showcase <duck_name>` full duck detail card
-- `!give @member <duck_name>` duck transfer between users
-- reaction-role listeners on `🦆` for onboarding messages created by the bot
-- SQLite-backed storage for ducks/users with auto migration for legacy schema
-- Name pools for common and legendary tiers
+- `!duck` - catch flow (cooldown, Keish, Zay, theft, revenge) via `POST /v1/duck/catch`
+- `!battle` - winner-takes-loser's-duck battle via `POST /v1/duck/battle` (UTC hourly limit; wins chain)
+- `!ducks [@member]` - dashboard link + count from `GET /me`
+- `!leaderboard` - `GET /leaderboard`
+- `!give @member <duck_name>` - `POST /v1/ducks/give`
+- `!help` - in-channel command reference
+- Reaction-role listeners on `🦆` for onboarding messages created by the bot
+- Typo helper (`!duk` etc.) still triggers a catch through the API
 
-## Project Layout
+## Project layout
 
-- `main.py` - entry point (runs `fishin_tiffin.bot`)
-- `fishin_tiffin/` - application package (`bot.py`, `duck_manager.py` cog, energy helpers, HTML generator, paths)
-- `post_duck_role_message.py` - thin wrapper → `python -m fishin_tiffin.post_duck_role_message` also works
-- `duck_data/` - SQLite + generated HTML + name pools (repo root)
-- `assets/` - GIF/PNG assets (repo root; paths resolved via `fishin_tiffin/paths.py`)
-- `config.yml` - local runtime config (token + optional server + ducks channel + optional roles/duck role)
+- `main.py` - entry point (`fishin_tiffin.bot.run_bot`)
+- `fishin_tiffin/bot.py` - Discord client, config loader, shared `aiohttp` session
+- `fishin_tiffin/duck_manager.py` - commands, API client, embed dispatch, role reactions, announcement relay
+- `fishin_tiffin/post_duck_role_message.py` - one-shot onboarding message poster
+- `assets/dap.gif` - typo helper reaction
+- Game art is served by **Duck-Game-backend** at `/static/game/`; the bot uses `image_url` from API responses (and uploads the file directly when the API host is private).
 
 ## Setup
 
-1. Create a new virtual environment.
-2. Install dependencies:
-   - `pip install -r requirements.txt`
-3. Edit `config.yml`:
-   - set `token`
-   - optionally set `server` to your Discord server (guild) ID
-   - set `ducks_channel` to your Discord ducks channel ID
-   - optionally set `roles_channel` to your roles channel ID
-   - optionally set `duck_role` to your duck role ID (used by onboarding script)
-4. Run:
-   - `python main.py`
+1. Run **Duck-Game-backend** (see that repo's README), e.g. `https://api.duckgame.app` or `http://127.0.0.1:19999` locally.
+2. Python venv and `pip install -r requirements.txt`
+3. Copy `config.example.yml` to `config.yml` and fill in:
+   - `token`, `ducks_channel`
+   - `duck_game_api_url` - base URL of the API (default `https://api.duckgame.app`)
+   - optional: `server`, `roles_channel`, `duck_role`, `duck_dashboard_base_url`, `leaderboard_season`, `duck_game_api_shared_secret`
+4. `python main.py`
 
-## Post The Duck Role Message Once
+## Post the duck role message once
 
-Use this one-time helper to manually post the onboarding message:
-
-- set `duck_role` in `config.yml` first
+- Set `duck_role` in `config.yml`
 - `python post_duck_role_message.py [channel_id]`
-- If `channel_id` is omitted, it posts in `roles_channel` when set, otherwise `ducks_channel`.
-- The message includes a short game explainer and auto-adds the `🦆` reaction.
+- Listeners in `duck_manager.py` add/remove the role when users react with `🦆` on bot messages in `roles_channel` (or the fallback channel).
 
-The bot listeners in `fishin_tiffin/duck_manager.py` will then add/remove the role when users add/remove that reaction.
-If `roles_channel` is set, only reactions in that channel are processed.
+## Web-origin announcements
 
-## Notes
-
-- The bot requires two config keys: `token` and `ducks_channel`.
-- `server` is optional and, when set, restricts commands to that guild ID.
-- `roles_channel` is optional; when set, duck reaction-role handling is limited to that channel.
-- `duck_role` is optional for normal gameplay, but required for `post_duck_role_message.py`.
-- External endpoints are preserved from YukiBot in code defaults:
-  - duck API: `https://duck.jocal.dev/duck`
-  - dashboard base URL: `https://duck.jocal.dev/user`
-- Data files are local to this repo under `duck_data`.
-
+When `duck_game_api_shared_secret` is configured, the bot polls `GET /v1/bot/pending-announcements` every 2s and relays any queued catch embeds (e.g. catches initiated from the web UI) into the channel the backend specifies, then ACKs them via `POST /v1/bot/announcements/ack`. Leave the secret unset to disable the poller.
