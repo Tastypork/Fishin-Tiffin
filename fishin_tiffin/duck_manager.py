@@ -15,6 +15,7 @@ from .duck_dashboard_html import generate_duck_dashboard_html
 from .duck_clock import utc_ts
 from .keish_energy import (
     BLESSING_DISPLAY_SECONDS,
+    BLESSING_DURATION_SECONDS,
     KEISH_ENERGY_GIF_PATH,
     KEISH_PROC_TITLE,
     KEISH_SADDLE_TITLE,
@@ -22,8 +23,11 @@ from .keish_energy import (
     KeishEnergy,
     blessing_proc_description,
 )
+from .items import ARI_PIE_COOLDOWN_DIVISOR, BIG_GUY_STAT_BONUS, ItemsManager
 from .paths import ASSETS_DIR, DUCK_DATA_DIR, HTML_DIR
+from .weather import WeatherManager, weather_catch_label
 from .zay_energy import (
+    ZAY_DEFENSE_PROBS,
     ZAY_ENERGY_GIF_PATH,
     ZAY_PROC_TITLE,
     ZayEnergy,
@@ -86,9 +90,11 @@ BOOT_IMAGE_URLS = [
 DUCK_OUTCOME_WEIGHTS = [
     ("zay_proc", 1),
     ("keish_proc", 1),
+    ("weather_proc", 5),
+    ("item_proc", 5),
     ("boot", 3),
     ("steal", 15),
-    ("new_duck", 80),
+    ("new_duck", 70),
 ]
 
 # Cooldown parameters
@@ -162,17 +168,28 @@ def _roll_stat(rarity: str) -> int:
     vals = list(range(1, 11))
     return random.choices(vals, weights=weights, k=1)[0]
 
-def _roll_shiny() -> bool:
-    return random.uniform(0, 100) < SHINY_PROB
+def _roll_shiny(mult: float = 1.0) -> bool:
+    return random.uniform(0, 100) < SHINY_PROB * mult
 
 
-def _roll_duck_outcome(*, allow_zay_proc: bool, allow_keish_proc: bool, allow_boot: bool) -> str:
+def _roll_duck_outcome(
+    *,
+    allow_zay_proc: bool,
+    allow_keish_proc: bool,
+    allow_weather_proc: bool,
+    allow_item_proc: bool,
+    allow_boot: bool,
+) -> str:
     labels = []
     weights = []
     for label, weight in DUCK_OUTCOME_WEIGHTS:
         if label == "zay_proc" and not allow_zay_proc:
             continue
         if label == "keish_proc" and not allow_keish_proc:
+            continue
+        if label == "weather_proc" and not allow_weather_proc:
+            continue
+        if label == "item_proc" and not allow_item_proc:
             continue
         if label == "boot" and not allow_boot:
             continue
@@ -326,6 +343,8 @@ class DuckManager(commands.Cog, name="DuckManager"):
         self.db.row_factory = sqlite3.Row
         self.keish = KeishEnergy()
         self.zay = ZayEnergy(bot, self)
+        self.weather = WeatherManager()
+        self.items = ItemsManager()
         self._init_db()
         _log("[DuckManager] initialized")
 
@@ -447,6 +466,13 @@ class DuckManager(commands.Cog, name="DuckManager"):
         cur.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
         return cur.fetchone()
 
+    def _duck_catch_weather_effects_lines(self, user_id: str) -> str:
+        """Italic weather + item-effect summary for catch embeds (above **Name:**)."""
+        w = weather_catch_label(self.weather.current)
+        item_labels = self.items.active_item_effect_labels(user_id)
+        effects = "None" if not item_labels else ", ".join(item_labels)
+        return f"*Weather: {w}*\n*Effects: {effects}*\n\n"
+
     def _set_user(self, user_id: str, ducks_list: list[str], last_catch: int | None, cooldown: int | None):
         cur = self.db.cursor()
         cur.execute("""
@@ -516,7 +542,7 @@ class DuckManager(commands.Cog, name="DuckManager"):
         attack = _roll_stat(rarity)
         defense = _roll_stat(rarity)
         speed = _roll_stat(rarity)
-        shiny = 1 if _roll_shiny() else 0
+        shiny = 1 if _roll_shiny(self.weather.shiny_multiplier()) else 0
         name = _pick_name_for_rarity(rarity)
         # If shiny, add sparkle to name
         if shiny:
@@ -542,6 +568,7 @@ class DuckManager(commands.Cog, name="DuckManager"):
 
     def _update_cooldown(self, user_id: str) -> int:
         cd = _roll_cooldown_seconds()
+        cd = max(1, round(cd * self.weather.cooldown_multiplier() / self.items.cooldown_divisor(user_id)))
         now_ts = int(datetime.now(timezone.utc).timestamp())
         row = self._get_user(user_id)
         ducks_list = json.loads(row["ducks_json"]) if row and row["ducks_json"] else []
@@ -811,8 +838,11 @@ class DuckManager(commands.Cog, name="DuckManager"):
             )
         return random.choice(lines)
 
-    def _duck_power(self, duck_row: sqlite3.Row) -> int:
-        return int(duck_row["attack"]) + int(duck_row["defense"]) + int(duck_row["speed"])
+    def _duck_power(self, duck_row: sqlite3.Row, owner_id: str | None = None) -> int:
+        base = int(duck_row["attack"]) + int(duck_row["defense"]) + int(duck_row["speed"])
+        if owner_id is None:
+            return base
+        return base + self.items.battle_bonus(owner_id) * 3
 
     async def _handle_revenge_battle(self, ctx: commands.Context, pending_revenge: sqlite3.Row) -> bool:
         """
@@ -848,8 +878,8 @@ class DuckManager(commands.Cog, name="DuckManager"):
             await ctx.reply("⚠️ Revenge window closed due to missing duck data.")
             return True
 
-        victim_power = self._duck_power(victim_duck)
-        thief_power = self._duck_power(thief_duck)
+        victim_power = self._duck_power(victim_duck, owner_id=victim_id)
+        thief_power = self._duck_power(thief_duck, owner_id=thief_id)
         margin = abs(victim_power - thief_power)
 
         if victim_power == thief_power:
@@ -950,11 +980,13 @@ class DuckManager(commands.Cog, name="DuckManager"):
         """Show duck game rules and commands."""
         commands_lines = [
             "`!duck` - Catch a duck (with cooldown).",
-            "`!battle` - Random PvP with any ducks; winner takes the loser's duck only if not Shiny/Legendary/Mythic.",
+            "`!battle` - Your random duck vs another member's (by power); **once per UTC hour** unless you keep **winning** (streak = chain). "
+            "Winner takes the loser's fighter only if it's stealable (**not** Shiny / Legendary / Mythic).",
             "`!ducks [@member]` - Open your/their duck dashboard.",
             "`!leaderboard` - Show top duck collectors in this server.",
             "`!give @member <duck_name>` - Transfer one of your ducks.",
             "`!release <duck_name>` - Release (delete) one of your ducks.",
+            "`!items` / `!weathers` / `!energies` - Explain drops, global weather, and Keish/Zay events.",
             "`!help` - Show this help message.",
         ]
         embed = discord.Embed(
@@ -971,17 +1003,88 @@ class DuckManager(commands.Cog, name="DuckManager"):
                 "- **Shiny** ducks are a rare cosmetic twist.\n"
                 "- **Theft**: Sometimes `!duck` pulls a random duck from another player instead of a fresh catch.\n"
                 "- If someone steals from you, catching a duck soon after can trigger revenge-steal.\n"
-                "- **Keish's ENERGY**: a rare burst where `!duck` ignores cooldown for a short time "
-                "(see the in-channel card; can't overlap **Zay's ENERGY**).\n"
-                "- **Zay's ENERGY**: a rare clash where **Zay tries to snatch ducks** from your collection. "
-                "Use **`!duck`** up to **three times** to defend—**each roll either holds him off or he grabs his take and leaves**. "
-                "Only non–Legendary / non–Mythic ducks can be lost.\n\n"
+                "- **Keish's ENERGY** & **Zay's ENERGY**: rare `!duck` procs — see **`!energies`**.\n"
+                "- **Weather** is server-wide; see **`!weathers`**.\n"
+                "- **Items** drop from `!duck` sometimes — see **`!items`**.\n\n"
                 "**Commands**\n"
                 f"{chr(10).join(commands_lines)}"
             ),
             color=discord.Color.blurple(),
         )
         embed.set_footer(text="Tip: Use !ducks to track your full collection.")
+        await ctx.reply(embed=embed, mention_author=False)
+
+    @commands.command(name="items")
+    async def duck_items_info(self, ctx: commands.Context):
+        """Explain item drops and effects."""
+        embed = discord.Embed(
+            title="Items — Big Guy Protein & AriPie Energy",
+            description=(
+                "**How you get them**\n"
+                "- Sometimes your `!duck` roll is an **item proc**: you receive **one** item at random "
+                "(uniform between the two). Getting the same item again **refreshes** its timer.\n\n"
+                "**Big Guy Protein**\n"
+                f"- **+{BIG_GUY_STAT_BONUS}** to **attack**, **defense**, and **speed** when your duck's power is calculated "
+                "(including **`!battle`**), for **2 hours**.\n\n"
+                "**AriPie Energy**\n"
+                f"- Your post-catch **cooldown** is divided by **{ARI_PIE_COOLDOWN_DIVISOR}** (stacks with weather), for **30 minutes**.\n\n"
+                "**Notes**\n"
+                "- Item and weather procs are skipped while **Keish's ENERGY** is active on you (see `!energies`)."
+            ),
+            color=discord.Color.red(),
+        )
+        embed.set_footer(text="FishinTiffin Duck Game")
+        await ctx.reply(embed=embed, mention_author=False)
+
+    @commands.command(name="weathers")
+    async def duck_weathers_info(self, ctx: commands.Context):
+        """Explain global weather."""
+        embed = discord.Embed(
+            title="Weather — Global pond conditions",
+            description=(
+                "**What it is**\n"
+                "- **One** weather applies to **everyone** at once. It only changes when someone's `!duck` hits a **weather proc**.\n"
+                "- The new weather is picked **at random** from the **two** possibilities that are **not** the current one.\n\n"
+                "**Normal**\n"
+                "- Default. **No** shiny or cooldown modifiers.\n\n"
+                "**Sunshine Sunflowers**\n"
+                "- **3×** shiny odds on new catches.\n\n"
+                "**Jerm Cloud**\n"
+                "- **2×** longer **catch cooldowns** for everyone.\n\n"
+                "**Flavour**\n"
+                "- Ashley / Jerm themed announcements when the weather shifts, same as in-channel cards."
+            ),
+            color=discord.Color.light_grey(),
+        )
+        embed.set_footer(text="FishinTiffin Duck Game")
+        await ctx.reply(embed=embed, mention_author=False)
+
+    @commands.command(name="energies")
+    async def duck_energies_info(self, ctx: commands.Context):
+        """Explain Keish's and Zay's ENERGY."""
+        d1, d2, d3 = ZAY_DEFENSE_PROBS
+        pct1, pct2, pct3 = int(round(d1 * 100)), int(round(d2 * 100)), int(round(d3 * 100))
+        embed = discord.Embed(
+            title="Energies — Keish & Zay",
+            description=(
+                "**Keish's ENERGY**\n"
+                "- Rare **`!duck` proc**: standalone message (no catch that command).\n"
+                f"- For **{BLESSING_DURATION_SECONDS}** seconds your **`!duck` cooldown is ignored**; timers in the UI use **half** "
+                f"of the real window (~**{BLESSING_DISPLAY_SECONDS}**s of “display” time).\n"
+                "- **Cannot** overlap **Zay's ENERGY** on you (and vice versa).\n"
+                "- While Keish is active on you, **weather** and **item** procs from `!duck` are skipped.\n\n"
+                "**Zay's ENERGY**\n"
+                "- Rare **`!duck` proc**: standalone event — he targets **your collection**.\n"
+                "- Use **`!duck`** up to **three** times; each use is **one defense round** with its own success chance "
+                f"(**{pct1}%**, then **{pct2}%**, then **{pct3}%**).\n"
+                "- **Fail once** → **steal finale**: he can remove multiple ducks in one go (scaled to how many he could take at the start). "
+                "Only **Legendary** and **Mythic** ducks are **never** taken.\n"
+                "- **Win all three** → full-defense finale; you cannot `!battle` until the encounter is over.\n"
+                "- Finish Zay (win or lose) before **`!battle`** works again."
+            ),
+            color=discord.Color.dark_purple(),
+        )
+        embed.set_footer(text="FishinTiffin Duck Game")
         await ctx.reply(embed=embed, mention_author=False)
 
     @commands.command(name="duck")
@@ -1027,6 +1130,8 @@ class DuckManager(commands.Cog, name="DuckManager"):
             outcome = _roll_duck_outcome(
                 allow_zay_proc=bool(allow_zay_proc),
                 allow_keish_proc=allow_keish_proc,
+                allow_weather_proc=not keish_energy_now,
+                allow_item_proc=not keish_energy_now,
                 allow_boot=not keish_energy_now,
             )
 
@@ -1068,6 +1173,24 @@ class DuckManager(commands.Cog, name="DuckManager"):
                 embed.set_footer(text=cd_msg)
                 if keish_energy_file:
                     await ctx.reply(embed=embed, file=keish_energy_file, mention_author=False)
+                else:
+                    await ctx.reply(embed=embed, mention_author=False)
+                return
+
+            if outcome == "weather_proc":
+                new_weather = self.weather.pick_new()
+                embed, file_obj = self.weather.build_proc_embed(new_weather)
+                if file_obj is not None:
+                    await ctx.reply(embed=embed, file=file_obj, mention_author=False)
+                else:
+                    await ctx.reply(embed=embed, mention_author=False)
+                return
+
+            if outcome == "item_proc":
+                new_item = self.items.grant_random(new_owner_id)
+                embed, file_obj = self.items.build_proc_embed(new_item)
+                if file_obj is not None:
+                    await ctx.reply(embed=embed, file=file_obj, mention_author=False)
                 else:
                     await ctx.reply(embed=embed, mention_author=False)
                 return
@@ -1167,6 +1290,7 @@ class DuckManager(commands.Cog, name="DuckManager"):
             atk, dfs, spd = duck_row["attack"], duck_row["defense"], duck_row["speed"]
 
             flair = RARITY_CATCH_FLAIR[rarity]
+            ctx_lines = self._duck_catch_weather_effects_lines(new_owner_id)
 
             if blessing_now:
                 # Blessing window: full duck card with Keish-themed titles.
@@ -1174,6 +1298,7 @@ class DuckManager(commands.Cog, name="DuckManager"):
                 title = KEISH_SADDLE_TITLE if shiny else KEISH_SNAG_TITLE
                 catch_body = (
                     f"{flair}\n\n"
+                    f"{ctx_lines}"
                     f"**Name:** {name}\n"
                     f"**Rarity:** {rarity}{' ✨' if shiny else ''}\n"
                     f"**Stats:** ⚔️ {atk}  🛡️ {dfs}  💨 {spd}\n"
@@ -1186,6 +1311,7 @@ class DuckManager(commands.Cog, name="DuckManager"):
                 )
                 catch_body = (
                     f"{flair}\n\n"
+                    f"{ctx_lines}"
                     f"**Name:** {name}\n"
                     f"**Rarity:** {rarity}{' ✨' if shiny else ''}\n"
                     f"**Stats:** ⚔️ {atk}  🛡️ {dfs}  💨 {spd}\n"
@@ -1485,8 +1611,8 @@ class DuckManager(commands.Cog, name="DuckManager"):
             await ctx.reply("Battle aborted: missing duck data.")
             return
 
-        cp = self._duck_power(challenger_duck)
-        op = self._duck_power(opponent_duck)
+        cp = self._duck_power(challenger_duck, owner_id=user_id)
+        op = self._duck_power(opponent_duck, owner_id=opponent_id)
         if cp == op:
             if random.random() < 0.5:
                 cp += 1
