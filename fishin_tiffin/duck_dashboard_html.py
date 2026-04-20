@@ -6,12 +6,13 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 RARITY_ORDER = {"Mythic": 5, "Legendary": 4, "Rare": 3, "Uncommon": 2, "Common": 1}
+# Match Duck-Game activity-client `Ducks.tsx` RARITY_COLORS (Title Case keys from DB).
 RARITY_HTML_COLORS = {
-    "Common": "#a0a0a0",
-    "Uncommon": "#4caf50",
-    "Rare": "#2196f3",
-    "Legendary": "#ff9800",
-    "Mythic": "#9c27b0",
+    "Common": "#8a8f98",
+    "Uncommon": "#2ecc71",
+    "Rare": "#3498db",
+    "Legendary": "#f1c40f",
+    "Mythic": "#e056fd",
 }
 
 
@@ -47,65 +48,103 @@ def generate_duck_dashboard_html(
         "<head>",
         f"<title>{escape(user_display_name)}'s Ducks</title>",
         "<style>",
-        "body { font-family: Arial, sans-serif; background: #f0f8ff; margin: 0; padding: 20px; }",
-        "h1 { text-align: center; color: #333; margin-bottom: 20px; }",
+        ":root {",
+        "  --lake-blue: #3d7a9e;",
+        "  --text: #fff;",
+        "  --text-muted: rgba(255,255,255,0.82);",
+        "  --text-dim: rgba(255,255,255,0.55);",
+        "  --surface: rgba(0,0,0,0.25);",
+        "  --surface-input: rgba(0,0,0,0.35);",
+        "  --border-subtle: rgba(255,255,255,0.12);",
+        "  --gold-a: #fff176;",
+        "  --gold-b: #ffb300;",
+        "  --gold-c: #f57c00;",
+        "}",
+        "body {",
+        "  font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;",
+        "  background-color: var(--lake-blue);",
+        "  color: var(--text);",
+        "  margin: 0; padding: 20px 16px 32px; min-height: 100vh;",
+        "  -webkit-font-smoothing: antialiased;",
+        "}",
+        ".page-title { text-align: center; margin: 0 0 8px; font-weight: 900; letter-spacing: 0.04em; font-size: clamp(1.25rem, 4vw, 1.75rem); line-height: 1.15;",
+        "  background: linear-gradient(180deg, var(--gold-a) 0%, var(--gold-b) 42%, var(--gold-c) 100%);",
+        "  -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;",
+        "  filter: drop-shadow(0 2px 0 rgba(0,0,0,0.35)); }",
+        ".page-sub { text-align: center; color: var(--text-muted); font-size: 0.9rem; font-weight: 700; letter-spacing: 0.04em; margin: 0 0 22px;",
+        "  text-shadow: 0 1px 0 rgba(0,0,0,0.35); }",
         ".controls { max-width: 1080px; margin: 0 auto 14px auto; display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }",
-        ".controls input, .controls select { padding: 10px 12px; border-radius: 8px; border: 1px solid #c9d7e1; font-size: 14px; }",
-        ".results-count { text-align: center; color: #4a5a66; margin-bottom: 16px; font-size: 14px; }",
+        ".controls input, .controls select {",
+        "  padding: 10px 12px; border-radius: 10px; font-size: 14px; color: var(--text);",
+        "  border: 1px solid var(--border-subtle); background: var(--surface-input);",
+        "  outline: none; }",
+        ".controls input::placeholder { color: var(--text-dim); }",
+        ".controls input:disabled, .controls select:disabled { opacity: 0.45; }",
+        ".results-count { text-align: center; color: var(--text-muted); margin-bottom: 16px; font-size: 14px; }",
         ".duck-grid { display: flex; flex-wrap: wrap; justify-content: center; gap: 20px; }",
-        ".duck-card { background: white; border-radius: 12px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);",
-        "             width: 220px; padding: 15px; text-align: center; transition: transform 0.2s; position: relative; cursor: pointer; }",
-        ".duck-card:hover { transform: scale(1.05); }",
-        ".duck-card img { border-radius: 8px; max-width: 100%; height: auto; margin-bottom: 10px; }",
-        ".rarity { font-weight: bold; display: block; margin-top: 5px; }",
-        ".stats { margin-top: 8px; font-size: 14px; color: #555; }",
-        ".age { margin-top: 6px; font-size: 12px; color: #888; }",
-        ".shiny { background: linear-gradient(135deg, #fffbe6, #ffffff); border: 3px solid gold;",
-        "         box-shadow: 0 0 15px gold; animation: shine 1s infinite alternate; }",
-        ".shiny::before { content: '✨ Shiny ✨'; position: absolute; top: -12px; right: -12px;",
-        "                 background: gold; color: white; font-size: 12px; font-weight: bold;",
-        "                 padding: 3px 6px; border-radius: 8px; box-shadow: 0 0 5px rgba(0,0,0,0.3); }",
-        ".empty { text-align: center; color: #6b7d8a; margin-top: 30px; font-size: 16px; }",
-        ".controls-note { text-align: center; color: #6b7d8a; margin-bottom: 22px; font-size: 13px; }",
-        ".duck-modal { position: fixed; inset: 0; background: #0f1115; display: none; align-items: center;",
-        "            justify-content: center; z-index: 9999; padding: 0; }",
+        ".duck-card {",
+        "  width: 220px; padding: 15px; text-align: center; transition: transform 0.2s, box-shadow 0.2s; position: relative; cursor: pointer;",
+        "  border-radius: 14px; box-sizing: border-box;",
+        "}",
+        ".duck-card:hover { transform: scale(1.03); }",
+        ".duck-card img {",
+        "  border-radius: 10px; max-width: 100%; height: auto; margin-bottom: 10px;",
+        "  border: 2px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.35); }",
+        ".duck-card.shiny {",
+        "  box-shadow: inset 0 0 0 1px rgba(255,179,0,0.45), 0 0 22px rgba(255,209,0,0.28);",
+        "  animation: shine 1.2s ease-in-out infinite alternate; }",
+        ".shiny::before { content: '✨ Shiny ✨'; position: absolute; top: -10px; right: -8px;",
+        "  background: linear-gradient(180deg, var(--gold-a), var(--gold-b)); color: #1a1a1a; font-size: 11px; font-weight: 900;",
+        "  padding: 4px 8px; border-radius: 999px; box-shadow: 0 2px 8px rgba(0,0,0,0.35); letter-spacing: 0.03em; }",
+        ".rarity {",
+        "  display: inline-block; margin-top: 8px; font-size: 11px; font-weight: 900; letter-spacing: 0.04em;",
+        "  padding: 2px 8px; border-radius: 999px; }",
+        ".duck-card b { color: #fff; font-weight: 1000; }",
+        ".stats { margin-top: 8px; font-size: 14px; color: var(--text-muted); }",
+        ".age { margin-top: 6px; font-size: 12px; color: var(--text-dim); }",
+        ".empty { text-align: center; color: var(--text-muted); margin-top: 30px; font-size: 16px; }",
+        ".controls-note { text-align: center; color: var(--text-dim); margin-bottom: 22px; font-size: 13px; }",
+        ".duck-modal { position: fixed; inset: 0; background: rgba(14, 32, 44, 0.94); display: none; align-items: center;",
+        "  justify-content: center; z-index: 9999; padding: 0; backdrop-filter: blur(4px); }",
         ".duck-modal.open { display: flex; }",
-        ".duck-modal-card { position: relative; width: 100vw; height: 100vh; border-radius: 0; overflow: hidden; background: #0f1115; }",
+        ".duck-modal-card { position: relative; width: 100vw; height: 100vh; border-radius: 0; overflow: hidden; background: #0f1a22; }",
         ".swipe-stage { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 12px; }",
         ".swipe-card { position: absolute; width: min(98vw, 640px); height: min(96vh, 1137px); aspect-ratio: 9 / 16;",
-        "             border-radius: 18px; overflow: hidden; background: #111; box-shadow: 0 22px 50px rgba(0,0,0,0.45);",
-        "             touch-action: none; }",
+        "  border-radius: 18px; overflow: hidden; background: #0a1218; box-shadow: 0 22px 50px rgba(0,0,0,0.55);",
+        "  touch-action: none; border: 1px solid rgba(255,255,255,0.08); }",
         ".swipe-card.next { transform: scale(0.96) translateY(8px); opacity: 0.78; }",
         ".swipe-card.front { z-index: 2; transition: transform 0.28s ease, opacity 0.28s ease; }",
         ".swipe-card.front.swipe-left { transform: translateX(-120%) rotate(-16deg); opacity: 0; }",
         ".swipe-card.front.swipe-right { transform: translateX(120%) rotate(16deg); opacity: 0; }",
-        ".duck-modal-image-wrap { position: absolute; inset: 0; background: #111; }",
+        ".duck-modal-image-wrap { position: absolute; inset: 0; background: #0a1218; }",
         ".duck-modal-image { width: 100%; height: 100%; object-fit: cover; display: block; }",
-        ".duck-modal-overlay { position: absolute; inset: 0; background: linear-gradient(to top, rgba(0,0,0,0.76) 0%, rgba(0,0,0,0.4) 32%, rgba(0,0,0,0.12) 56%, rgba(0,0,0,0.05) 100%); }",
+        ".duck-modal-overlay { position: absolute; inset: 0; background: linear-gradient(to top, rgba(0,0,0,0.82) 0%, rgba(0,0,0,0.45) 35%, rgba(61,122,158,0.12) 100%); }",
         ".duck-modal-body { position: absolute; left: 0; right: 0; bottom: 108px; padding: 18px 22px 0 22px; color: #fff; z-index: 2; }",
-        ".duck-modal-title { margin: 0 0 6px 0; font-size: clamp(22px, 4vw, 34px); color: #fff; }",
-        ".duck-modal-meta { margin: 0; color: #e8edf2; font-size: clamp(13px, 2.2vw, 17px); line-height: 1.45; }",
+        ".duck-modal-title { margin: 0 0 6px 0; font-size: clamp(22px, 4vw, 34px); font-weight: 900; letter-spacing: 0.02em;",
+        "  background: linear-gradient(180deg, #fff 0%, rgba(255,255,255,0.92) 100%); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }",
+        ".duck-modal-meta { margin: 0; color: var(--text-muted); font-size: clamp(13px, 2.2vw, 17px); line-height: 1.45; }",
         ".swipe-badge { position: absolute; top: 14px; padding: 14px 22px; border: 5px solid; border-radius: 14px;",
-        "              font-size: clamp(26px, 9vw, 56px); font-weight: 900; letter-spacing: 0.06em; opacity: 0;",
-        "              text-transform: uppercase; line-height: 1.05; text-align: center;",
-        "              transform: rotate(-14deg); z-index: 3; user-select: none; pointer-events: none;",
-        "              text-shadow: 0 2px 0 rgba(0,0,0,0.25); box-shadow: 0 8px 24px rgba(0,0,0,0.35); }",
+        "  font-size: clamp(26px, 9vw, 56px); font-weight: 900; letter-spacing: 0.06em; opacity: 0;",
+        "  text-transform: uppercase; line-height: 1.05; text-align: center;",
+        "  transform: rotate(-14deg); z-index: 3; user-select: none; pointer-events: none;",
+        "  text-shadow: 0 2px 0 rgba(0,0,0,0.25); box-shadow: 0 8px 24px rgba(0,0,0,0.35); }",
         ".swipe-badge .badge-sub { display: block; font-size: 0.42em; font-weight: 800; letter-spacing: 0.12em; margin-top: 6px; opacity: 0.95; }",
-        ".swipe-badge.like { right: 10px; color: #1ED760; border-color: #1ED760; background: rgba(30,215,96,0.22); transform: rotate(14deg); }",
-        ".swipe-badge.nope { left: 10px; color: #FF4454; border-color: #FF4454; background: rgba(255,68,84,0.22); }",
+        ".swipe-badge.like { right: 10px; color: #2ecc71; border-color: #2ecc71; background: rgba(46,204,113,0.18); transform: rotate(14deg); }",
+        ".swipe-badge.nope { left: 10px; color: #e74c3c; border-color: #e74c3c; background: rgba(231,76,60,0.18); }",
         ".duck-modal-actions { position: absolute; left: 0; right: 0; bottom: 24px; display: flex; gap: 16px; justify-content: center; z-index: 3; }",
-        ".vote-btn { border: none; border-radius: 999px; width: 68px; height: 68px; font-size: 30px; cursor: pointer; transition: transform 0.12s ease; box-shadow: 0 8px 22px rgba(0,0,0,0.3); }",
-        ".vote-btn:hover { transform: translateY(-1px); }",
-        ".vote-nope { background: #ffe8ea; }",
-        ".vote-like { background: #e8fff0; }",
-        ".duck-modal-close { position: absolute; top: 10px; right: 10px; border: none; width: 34px; height: 34px;",
-        "                 border-radius: 999px; background: rgba(0,0,0,0.56); color: #fff; font-size: 18px; cursor: pointer; z-index: 2; }",
-        ".swipe-hint { position: absolute; left: 0; right: 0; bottom: 4px; text-align: center; color: rgba(255,255,255,0.8); font-size: 12px; z-index: 3; }",
-        "@keyframes shine { from { box-shadow: 0 0 5px gold; } to { box-shadow: 0 0 20px gold; } }",
+        ".vote-btn { border: 1px solid var(--border-subtle); border-radius: 999px; width: 68px; height: 68px; font-size: 30px; cursor: pointer;",
+        "  transition: transform 0.12s ease; background: rgba(255,255,255,0.1); box-shadow: 0 8px 22px rgba(0,0,0,0.35); }",
+        ".vote-btn:hover { transform: translateY(-1px); background: rgba(255,255,255,0.16); }",
+        ".duck-modal-close { position: absolute; top: 10px; right: 10px; border: 1px solid var(--border-subtle); width: 34px; height: 34px;",
+        "  border-radius: 999px; background: rgba(0,0,0,0.45); color: #fff; font-size: 18px; cursor: pointer; z-index: 2; }",
+        ".swipe-hint { position: absolute; left: 0; right: 0; bottom: 4px; text-align: center; color: rgba(255,255,255,0.72); font-size: 12px; z-index: 3; }",
+        "@keyframes shine { from { box-shadow: inset 0 0 0 1px rgba(255,179,0,0.35), 0 0 12px rgba(255,209,0,0.15); }",
+        "  to { box-shadow: inset 0 0 0 1px rgba(255,179,0,0.55), 0 0 26px rgba(255,209,0,0.35); } }",
         "</style>",
         "</head>",
         "<body>",
-        f"<h1>🦆 {escape(user_display_name)}'s Ducks</h1>",
+        f"<h1 class='page-title'>🦆 {escape(user_display_name)}'s Ducks</h1>",
+        "<p class='page-sub'>Duck Game</p>",
     ]
 
     if not sorted_ducks:
@@ -160,7 +199,7 @@ def generate_duck_dashboard_html(
 
         for d in sorted_ducks:
             rarity = str(d.get("rarity", "Common"))
-            rarity_color = RARITY_HTML_COLORS.get(rarity, "#000")
+            rarity_color = RARITY_HTML_COLORS.get(rarity, "#8a8f98")
             timestamp = int(d.get("timestamp", 0))
             age_str = _fmt_age_ago(timestamp)
             is_shiny = bool(d.get("shiny", 0))
@@ -171,15 +210,19 @@ def generate_duck_dashboard_html(
             speed = int(d.get("speed", 0))
             total_power = attack + defense + speed
             url = str(d.get("url", ""))
+            card_surface = (
+                f"border:1px solid {rarity_color}55;background:rgba(255,255,255,0.06);"
+            )
 
             html.append(
-                f"<div class='{card_class}' data-name='{escape(name.lower())}' "
+                f"<div class='{card_class}' style='{card_surface}' data-name='{escape(name.lower())}' "
                 f"data-rarity='{escape(rarity)}' data-rarity-order='{RARITY_ORDER.get(rarity, 0)}' "
                 f"data-timestamp='{timestamp}' data-shiny='{'1' if is_shiny else '0'}' "
                 f"data-attack='{attack}' data-defense='{defense}' data-speed='{speed}' data-power='{total_power}'>"
                 f"<img src='{escape(url)}' alt='{escape(name)}'>"
                 f"<div><b>{escape(name)}</b></div>"
-                f"<span class='rarity' style='color:{rarity_color};'>{escape(rarity)}</span>"
+                f"<span class='rarity' style='background:{rarity_color}33;border:1px solid {rarity_color}99;color:#fff'>"
+                f"{escape(rarity)}</span>"
                 f"<div class='stats'>⚔️ {attack} &nbsp; 🛡️ {defense} &nbsp; 💨 {speed}</div>"
                 f"<div class='age'>Caught {escape(age_str)}</div>"
                 f"</div>"

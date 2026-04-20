@@ -1,6 +1,6 @@
 # duck_manager.py — Duck game cog (!duck, DB, Keish/Zay energy).
 from discord.ext import commands
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import discord
 import aiohttp
 import asyncio
@@ -92,10 +92,10 @@ DUCK_OUTCOME_WEIGHTS = [
 ]
 
 # Cooldown parameters
-COOLDOWN_MEAN = 90.0  # seconds
-COOLDOWN_STD = 360.0   # seconds
+COOLDOWN_MEAN = 30.0  # seconds
+COOLDOWN_STD = 120.0   # seconds
 COOLDOWN_MIN = 1      # seconds
-COOLDOWN_MAX = 15 * 60  # 15 minutes
+COOLDOWN_MAX = 5 * 60  # 5 minutes
 
 REVENGE_WINDOW_SECONDS = 5 * 60
 REVENGE_SWING_STEAL_THRESHOLD = 20
@@ -431,6 +431,14 @@ class DuckManager(commands.Cog, name="DuckManager"):
                 expires_ts     INTEGER NOT NULL
             )
         """)
+
+        # Idempotent !battle column migration (one battle per UTC hour bucket + win streak bypass).
+        cur.execute("PRAGMA table_info(users)")
+        existing_cols = {row["name"] for row in cur.fetchall()}
+        if "battle_hour_bucket" not in existing_cols:
+            cur.execute("ALTER TABLE users ADD COLUMN battle_hour_bucket INTEGER")
+        if "battle_streak" not in existing_cols:
+            cur.execute("ALTER TABLE users ADD COLUMN battle_streak INTEGER")
         self.db.commit()
 
     # ---------- HELPERS ----------
@@ -574,6 +582,40 @@ class DuckManager(commands.Cog, name="DuckManager"):
             return False
         return duck_row["rarity"] not in ("Legendary", "Mythic")
 
+    @staticmethod
+    def _battle_hour_bucket_now() -> int:
+        return utc_ts() // 3600
+
+    @staticmethod
+    def _seconds_until_next_utc_hour() -> int:
+        now = datetime.now(timezone.utc)
+        next_hour = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        return max(1, int((next_hour - now).total_seconds()))
+
+    def _can_battle(self, user_id: str) -> tuple[bool, int | None]:
+        """Whether the user may start or continue a !battle chain (UTC hour bucket + streak)."""
+        bucket = self._battle_hour_bucket_now()
+        row = self._get_user(user_id)
+        if row is None:
+            return True, None
+        row_bucket = row["battle_hour_bucket"]
+        if row_bucket is None or row_bucket != bucket:
+            return True, None
+        if row["battle_streak"]:
+            return True, None
+        return False, self._seconds_until_next_utc_hour()
+
+    def _set_battle_state(self, user_id: str, bucket: int, streak: bool) -> None:
+        row = self._get_user(user_id)
+        if row is None:
+            return
+        cur = self.db.cursor()
+        cur.execute(
+            "UPDATE users SET battle_hour_bucket = ?, battle_streak = ? WHERE user_id = ?",
+            (bucket, 1 if streak else 0, user_id),
+        )
+        self.db.commit()
+
     def _get_user_duck_ids(self, user_id: str) -> list[str]:
         row = self._get_user(user_id)
         if not row or not row["ducks_json"]:
@@ -602,21 +644,45 @@ class DuckManager(commands.Cog, name="DuckManager"):
             return None
         return random.choice(eligible_duck_ids)
 
-    def _get_random_user_with_stealable_ducks(self, exclude_user_id: str = None) -> tuple[str, str] | None:
+    def _get_random_duck_from_user(
+        self,
+        user_id: str,
+        exclude_duck_ids: set[str] | None = None,
+    ) -> str | None:
+        """Any owned duck (including Legendary/Mythic/Shiny) — for battle fighters only."""
+        exclude_duck_ids = exclude_duck_ids or set()
+        eligible_duck_ids = []
+        for duck_id in self._get_user_duck_ids(user_id):
+            if duck_id in exclude_duck_ids:
+                continue
+            duck_row = self._get_duck(duck_id)
+            if duck_row:
+                eligible_duck_ids.append(duck_id)
+        if not eligible_duck_ids:
+            return None
+        return random.choice(eligible_duck_ids)
+
+    def _get_random_user_with_stealable_ducks(
+        self,
+        exclude_user_id: str = None,
+        allowed_user_ids: set[str] | None = None,
+    ) -> tuple[str, str] | None:
         """
         Returns a random (user_id, duck_id) tuple from a user who has stealable ducks.
         exclude_user_id: user to exclude from selection
+        allowed_user_ids: if provided, only users in this set are eligible (e.g. current guild members).
         Returns None if no users with stealable ducks exist (other than excluded user).
         """
         cur = self.db.cursor()
         cur.execute("SELECT user_id, ducks_json FROM users WHERE ducks_json IS NOT NULL AND ducks_json != '[]' AND ducks_json != ''")
         rows = cur.fetchall()
-        
-        # Filter out excluded user and collect users with ducks
+
         candidates = []
         for row in rows:
             user_id = row["user_id"]
             if exclude_user_id and user_id == exclude_user_id:
+                continue
+            if allowed_user_ids is not None and user_id not in allowed_user_ids:
                 continue
             duck_ids = json.loads(row["ducks_json"]) if row["ducks_json"] else []
             eligible_duck_ids = []
@@ -626,15 +692,65 @@ class DuckManager(commands.Cog, name="DuckManager"):
                     eligible_duck_ids.append(duck_id)
             if eligible_duck_ids:
                 candidates.append((user_id, eligible_duck_ids))
-        
+
         if not candidates:
             return None
-        
-        # Pick random user
+
         random_user_id, duck_ids = random.choice(candidates)
-        # Pick random duck from that user
         random_duck_id = random.choice(duck_ids)
         return (random_user_id, random_duck_id)
+
+    def _get_random_user_with_ducks(
+        self,
+        exclude_user_id: str = None,
+        allowed_user_ids: set[str] | None = None,
+    ) -> tuple[str, str] | None:
+        """
+        Returns a random (user_id, duck_id) from any user who owns at least one duck.
+        Same filtering as _get_random_user_with_stealable_ducks but any duck qualifies.
+        """
+        cur = self.db.cursor()
+        cur.execute("SELECT user_id, ducks_json FROM users WHERE ducks_json IS NOT NULL AND ducks_json != '[]' AND ducks_json != ''")
+        rows = cur.fetchall()
+
+        candidates = []
+        for row in rows:
+            user_id = row["user_id"]
+            if exclude_user_id and user_id == exclude_user_id:
+                continue
+            if allowed_user_ids is not None and user_id not in allowed_user_ids:
+                continue
+            duck_ids = json.loads(row["ducks_json"]) if row["ducks_json"] else []
+            eligible_duck_ids = []
+            for duck_id in duck_ids:
+                duck_row = self._get_duck(duck_id)
+                if duck_row:
+                    eligible_duck_ids.append(duck_id)
+            if eligible_duck_ids:
+                candidates.append((user_id, eligible_duck_ids))
+
+        if not candidates:
+            return None
+
+        random_user_id, duck_ids = random.choice(candidates)
+        random_duck_id = random.choice(duck_ids)
+        return (random_user_id, random_duck_id)
+
+    async def _guild_member_ids(self, guild: discord.Guild | None) -> set[str] | None:
+        """Return ``{str(member.id) for member in guild.members}`` or ``None`` if unavailable.
+
+        Chunks the guild once so ``guild.members`` is populated on gateway reconnects.
+        Used to restrict steal/battle targets and leaderboard ranks to people currently in the server.
+        """
+        if guild is None:
+            return None
+        if not guild.chunked:
+            try:
+                await guild.chunk()
+            except discord.HTTPException as exc:
+                LOGGER.warning("guild member chunk failed (steal filter skipped): %s", exc)
+                return None
+        return {str(m.id) for m in guild.members}
 
     def _set_pending_revenge(self, victim_id: str, thief_id: str, stolen_duck_id: str):
         now_ts = int(datetime.now(timezone.utc).timestamp())
@@ -715,13 +831,13 @@ class DuckManager(commands.Cog, name="DuckManager"):
         victim_name = victim_member.display_name if victim_member else f"User {victim_id}"
         thief_name = thief_member.display_name if thief_member else f"User {thief_id}"
 
-        victim_fighter_id = self._get_random_stealable_duck_from_user(victim_id)
-        thief_fighter_id = self._get_random_stealable_duck_from_user(thief_id)
+        victim_fighter_id = self._get_random_duck_from_user(victim_id)
+        thief_fighter_id = self._get_random_duck_from_user(thief_id)
 
         if not victim_fighter_id or not thief_fighter_id:
             self._clear_pending_revenge(victim_id, stolen_duck_id)
             await ctx.reply(
-                "⚠️ Revenge window closed: one side has no stealable ducks left to battle with."
+                "⚠️ Revenge window closed: one side has no ducks left to battle with."
             )
             return True
 
@@ -834,10 +950,11 @@ class DuckManager(commands.Cog, name="DuckManager"):
         """Show duck game rules and commands."""
         commands_lines = [
             "`!duck` - Catch a duck (with cooldown).",
+            "`!battle` - Random PvP with any ducks; winner takes the loser's duck only if not Shiny/Legendary/Mythic.",
             "`!ducks [@member]` - Open your/their duck dashboard.",
-            "`!leaderboard` - Show top duck collectors.",
-            "`!showcase <duck_name>` - View a duck's details.",
+            "`!leaderboard` - Show top duck collectors in this server.",
             "`!give @member <duck_name>` - Transfer one of your ducks.",
+            "`!release <duck_name>` - Release (delete) one of your ducks.",
             "`!help` - Show this help message.",
         ]
         embed = discord.Embed(
@@ -987,7 +1104,11 @@ class DuckManager(commands.Cog, name="DuckManager"):
             will_steal = outcome == "steal"
             steal_result = None
             if will_steal:
-                steal_result = self._get_random_user_with_stealable_ducks(exclude_user_id=new_owner_id)
+                allowed_ids = await self._guild_member_ids(ctx.guild)
+                steal_result = self._get_random_user_with_stealable_ducks(
+                    exclude_user_id=new_owner_id,
+                    allowed_user_ids=allowed_ids,
+                )
             
             if will_steal and steal_result:
                 # Steal a random duck from a random user
@@ -1121,6 +1242,8 @@ class DuckManager(commands.Cog, name="DuckManager"):
             await ctx.reply("Use this command in a server to see the leaderboard.")
             return
 
+        member_ids = await self._guild_member_ids(ctx.guild) or set()
+
         cur = self.db.cursor()
         cur.execute("SELECT user_id, ducks_json FROM users")
         rows = cur.fetchall()
@@ -1138,7 +1261,7 @@ class DuckManager(commands.Cog, name="DuckManager"):
         eligible = [
             (user_id, count)
             for user_id, count in leaderboard
-            if ctx.guild.get_member(int(user_id)) is not None
+            if user_id in member_ids
         ]
         top10 = eligible[:10]
 
@@ -1312,6 +1435,171 @@ class DuckManager(commands.Cog, name="DuckManager"):
             f"🎁 {ctx.author.mention} gave **{duck_name}** ({row['rarity']}) "
             f"to {member.mention}!"
         )
+
+    @commands.command(name="battle")
+    async def duck_battle(self, ctx: commands.Context):
+        """Random PvP battle: any of your ducks vs another member's. Winner takes the loser's fighter
+        only if it could be stolen (!duck theft rules: not Shiny / Legendary / Mythic).
+
+        One battle per UTC hour; a win grants a streak bypass so you can chain as long as you keep winning.
+        """
+        if ctx.guild is None:
+            await ctx.reply("Battles can only be used in a server.", mention_author=True)
+            return
+        if ctx.channel.id != self.bot.ducks:
+            return await ctx.reply(
+                "This command can only be used in the 🦆 ducks channel.", delete_after=5
+            )
+
+        user_id = str(ctx.author.id)
+
+        if self.zay.active(user_id):
+            await ctx.reply("⚠️ Finish **Zay's ENERGY** with `!duck` before battling.")
+            return
+
+        allowed, wait_sec = self._can_battle(user_id)
+        if not allowed and wait_sec is not None:
+            await ctx.reply(
+                f"⏳ You've used your battle for this hour. Next window in **{_fmt_duration(wait_sec)}**."
+            )
+            return
+
+        challenger_duck_id = self._get_random_duck_from_user(user_id)
+        if not challenger_duck_id:
+            await ctx.reply("You need at least one duck to battle with.")
+            return
+
+        allowed_ids = await self._guild_member_ids(ctx.guild)
+        opp = self._get_random_user_with_ducks(
+            exclude_user_id=user_id,
+            allowed_user_ids=allowed_ids,
+        )
+        if not opp:
+            await ctx.reply("Nobody else in this server has a duck you can battle against (yet).")
+            return
+
+        opponent_id, opponent_duck_id = opp
+        challenger_duck = self._get_duck(challenger_duck_id)
+        opponent_duck = self._get_duck(opponent_duck_id)
+        if not challenger_duck or not opponent_duck:
+            await ctx.reply("Battle aborted: missing duck data.")
+            return
+
+        cp = self._duck_power(challenger_duck)
+        op = self._duck_power(opponent_duck)
+        if cp == op:
+            if random.random() < 0.5:
+                cp += 1
+            else:
+                op += 1
+        margin = abs(cp - op)
+
+        challenger_wins = cp > op
+        winner_name = challenger_duck["name"] if challenger_wins else opponent_duck["name"]
+        loser_name = opponent_duck["name"] if challenger_wins else challenger_duck["name"]
+        flavor = self._random_battle_flavor(winner_name=winner_name, loser_name=loser_name, margin=margin)
+
+        bucket = self._battle_hour_bucket_now()
+        if challenger_wins:
+            self._set_battle_state(user_id, bucket, streak=True)
+            if self._is_stealable_duck(opponent_duck):
+                self._remove_duck_from_user(opponent_id, opponent_duck_id)
+                self._add_duck_to_user(user_id, opponent_duck_id)
+                self._set_duck_owner(opponent_duck_id, user_id)
+                outcome_line = (
+                    f"🏆 {ctx.author.mention} wins! You take **{opponent_duck['name']}** from <@{opponent_id}>."
+                )
+            else:
+                outcome_line = (
+                    f"🏆 {ctx.author.mention} wins the fight! **{opponent_duck['name']}** is "
+                    "**Shiny**, **Legendary**, or **Mythic** — it stays with <@{opponent_id}>."
+                )
+            title = "⚔️ Duck Battle — Victory!"
+            color = discord.Color.green()
+            footer = (
+                "You won — `!battle` again now to keep rolling, or stop anytime. "
+                "One battle per hour, win streaks keep you alive!"
+            )
+        else:
+            self._set_battle_state(user_id, bucket, streak=False)
+            if self._is_stealable_duck(challenger_duck):
+                self._remove_duck_from_user(user_id, challenger_duck_id)
+                self._add_duck_to_user(opponent_id, challenger_duck_id)
+                self._set_duck_owner(challenger_duck_id, opponent_id)
+                outcome_line = (
+                    f"💔 <@{opponent_id}> wins! They take **{challenger_duck['name']}** from you."
+                )
+            else:
+                outcome_line = (
+                    f"💔 <@{opponent_id}> wins the fight! **{challenger_duck['name']}** is protected "
+                    "(Shiny / Legendary / Mythic) and stays with you."
+                )
+            title = "⚔️ Duck Battle — Defeat"
+            color = discord.Color.red()
+            footer = (
+                "One battle per hour, win streaks keep you alive! "
+                "`!battle` again after a win, or wait for the next hour if you lost."
+            )
+
+        description = (
+            f"{ctx.author.mention} sends **{challenger_duck['name']}** "
+            f"(⚔️ {challenger_duck['attack']}  🛡️ {challenger_duck['defense']}  💨 {challenger_duck['speed']})\n"
+            f"vs\n"
+            f"<@{opponent_id}> sends **{opponent_duck['name']}** "
+            f"(⚔️ {opponent_duck['attack']}  🛡️ {opponent_duck['defense']}  💨 {opponent_duck['speed']})\n\n"
+            f"{flavor}\n\n"
+            f"{outcome_line}"
+        )
+
+        embed = discord.Embed(title=title, description=description, color=color)
+        embed.set_footer(text=footer)
+        await ctx.reply(embed=embed)
+
+    @commands.command(name="release")
+    async def release_duck(self, ctx: commands.Context, *, duck_name: str):
+        """Release (delete) your most recently caught duck with this name.
+
+        Usage: !release DuckName
+        """
+        want = duck_name.strip()
+        if not want:
+            await ctx.reply("Provide a duck name.")
+            return
+
+        user_id = str(ctx.author.id)
+        urow = self._get_user(user_id)
+        if not urow or not urow["ducks_json"]:
+            await ctx.reply("You don't have any ducks to release.")
+            return
+
+        duck_ids = json.loads(urow["ducks_json"])
+        candidates: list[sqlite3.Row] = []
+        for duck_id in duck_ids:
+            d = self._get_duck(duck_id)
+            if d and d["name"] == want:
+                candidates.append(d)
+
+        if not candidates:
+            cur = self.db.cursor()
+            cur.execute("SELECT 1 FROM ducks WHERE name = ? LIMIT 1", (want,))
+            if cur.fetchone():
+                await ctx.reply(f"You don't have a duck named **{want}** to release.")
+            else:
+                await ctx.reply(f"No duck named **{want}** was found.")
+            return
+
+        chosen = max(candidates, key=lambda d: int(d["timestamp"]))
+        name_out = chosen["name"]
+        rarity_out = chosen["rarity"]
+        self._obliterate_duck(user_id, chosen["duck_id"])
+
+        embed = discord.Embed(
+            title="🕊️ Duck Released",
+            description=f"You released **{name_out}** ({rarity_out}).",
+            color=RARITY_EMBED_COLORS.get(rarity_out, discord.Color.dark_grey()),
+        )
+        embed.set_footer(text="One duck lost to the wild — forever.")
+        await ctx.reply(embed=embed)
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):

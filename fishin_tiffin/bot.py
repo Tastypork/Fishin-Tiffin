@@ -87,7 +87,9 @@ class FishinTiffin(commands.Bot):
 
 def run_bot() -> None:
     intents = discord.Intents.all()
-    bot = FishinTiffin(command_prefix="!", intents=intents, help_command=None)
+    bot = FishinTiffin(
+        command_prefix="!", intents=intents, help_command=None, case_insensitive=True
+    )
 
     logging.basicConfig(
         level=getattr(logging, str(bot.log_level).upper(), logging.INFO),

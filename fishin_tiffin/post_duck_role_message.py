@@ -16,7 +16,9 @@ async def post_duck_role_message(channel_id: int | None = None) -> None:
     intents.members = True
     intents.message_content = False
 
-    bot = FishinTiffin(command_prefix="!", intents=intents, help_command=None)
+    bot = FishinTiffin(
+        command_prefix="!", intents=intents, help_command=None, case_insensitive=True
+    )
 
     logging.basicConfig(
         level=getattr(logging, str(bot.log_level).upper(), logging.INFO),
