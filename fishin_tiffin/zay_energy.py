@@ -18,12 +18,13 @@ LOGGER = logging.getLogger("fishin_tiffin.ducks")
 
 # Proc frequency: see duck_manager.DUCK_OUTCOME_WEIGHTS ("zay_proc", 1 of 100).
 # Per-round defense success chance (rounds 1–3); first failed roll ends in a steal finale.
-ZAY_DEFENSE_PROBS = (0.9, 0.7, 0.5)
+ZAY_DEFENSE_PROBS = (0.75, 0.5, 0.25)
 
-CLASH_ASSET_PATH = ASSETS_DIR / "clash.png"
-ZAY_ENERGY_GIF_PATH = ASSETS_DIR / "zay_energy.gif"
-ZAY_FINALE_WHEN_STOLE_ASSET_PATH = ASSETS_DIR / "zay_success.png"
-ZAY_FINALE_WHEN_DEFENDED_ASSET_PATH = ASSETS_DIR / "zay_defeat.png"
+ZAY_ENERGY_DIR = ASSETS_DIR / "zay_energy"
+CLASH_ASSET_PATH = ZAY_ENERGY_DIR / "clash.png"
+ZAY_ENERGY_GIF_PATH = ZAY_ENERGY_DIR / "zay_energy.gif"
+ZAY_FINALE_WHEN_STOLE_ASSET_PATH = ZAY_ENERGY_DIR / "zay_success.png"
+ZAY_FINALE_WHEN_DEFENDED_ASSET_PATH = ZAY_ENERGY_DIR / "zay_defeat.png"
 
 ZAY_PROC_TITLE = "ZAY IS COMING FOR YOUR FLOCK"
 

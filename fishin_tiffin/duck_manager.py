@@ -10,22 +10,24 @@ import random
 import uuid
 from pathlib import Path
 import logging
+from dataclasses import dataclass, field
 
 from .duck_dashboard_html import generate_duck_dashboard_html
 from .duck_clock import utc_ts
 from .keish_energy import (
-    BLESSING_DISPLAY_SECONDS,
-    BLESSING_DURATION_SECONDS,
     KEISH_ENERGY_GIF_PATH,
+    KEISH_FLOCK_CATCH_TITLE,
+    KEISH_FLOCK_MAX,
+    KEISH_FLOCK_MIN,
+    KEISH_FLOCK_ROLLS,
     KEISH_PROC_TITLE,
-    KEISH_SADDLE_TITLE,
-    KEISH_SNAG_TITLE,
     KeishEnergy,
-    blessing_proc_description,
+    keish_proc_description,
+    pick_keish_success_image_path,
 )
 from .items import ARI_PIE_COOLDOWN_DIVISOR, BIG_GUY_STAT_BONUS, ItemsManager
 from .paths import ASSETS_DIR, DUCK_DATA_DIR, HTML_DIR
-from .weather import WeatherManager, weather_catch_label
+from .weather import WEATHER_EMBED_COLOR, WeatherManager, weather_catch_label
 from .zay_energy import (
     ZAY_DEFENSE_PROBS,
     ZAY_ENERGY_GIF_PATH,
@@ -37,6 +39,11 @@ from .zay_energy import (
 
 LOGGER = logging.getLogger("fishin_tiffin.ducks")
 DUCK_ROLE_EMOJI = "🦆"
+
+# Commands allowed outside `ducks_channel` (reference / read-only).
+DUCK_INFO_COMMAND_NAMES = frozenset(
+    {"help", "items", "weathers", "energies", "ducks", "leaderboard"}
+)
 
 
 def _log(message: str):
@@ -90,11 +97,11 @@ BOOT_IMAGE_URLS = [
 DUCK_OUTCOME_WEIGHTS = [
     ("zay_proc", 1),
     ("keish_proc", 1),
-    ("weather_proc", 5),
-    ("item_proc", 5),
+    ("weather_proc", 2),
+    ("item_proc", 2),
     ("boot", 3),
     ("steal", 15),
-    ("new_duck", 70),
+    ("new_duck", 76),
 ]
 
 # Cooldown parameters
@@ -105,6 +112,8 @@ COOLDOWN_MAX = 5 * 60  # 5 minutes
 
 REVENGE_WINDOW_SECONDS = 5 * 60
 REVENGE_SWING_STEAL_THRESHOLD = 20
+
+BATTLE_CHALLENGE_TIMEOUT_SECONDS = 90
 
 # Stat weighting (1..10) — rarity shifts probability mass higher
 STAT_WEIGHTS = {
@@ -220,19 +229,6 @@ def _fmt_duration(seconds: int) -> str:
     return f"{m}m {s}s"
 
 
-def _fmt_age_ago(timestamp: int) -> str:
-    age_seconds = int(datetime.now(timezone.utc).timestamp()) - int(timestamp)
-    minutes, seconds = divmod(age_seconds, 60)
-    hours, minutes = divmod(minutes, 60)
-    days, hours = divmod(hours, 24)
-    if days > 0:
-        return f"{days}d {hours}h ago"
-    if hours > 0:
-        return f"{hours}h {minutes}m ago"
-    if minutes > 0:
-        return f"{minutes}m {seconds}s ago"
-    return f"{seconds}s ago"
-
 def _generate_duck_id() -> str:
     # Generate a unique ID for each duck catch
     return str(uuid.uuid4())
@@ -250,7 +246,7 @@ def build_duck_onboarding_embed(role_mention: str) -> discord.Embed:
             "- `!duck` has a randomized cooldown per successful catch.\n"
             "- Sometimes your `!duck` steals one from another player.\n"
             "- If **Zay** shows up, **`!duck`** up to **three times** to defend your flock (he leaves after a failed block).\n\n"
-            "- If **Keish** shows up, she's **giving you a boost**—spam **`!duck`** to keep the energy going.\n\n"
+            "- If **Keish** shows up, **he** lines up **three** special **`!duck`** pulls—each one nets a **flock** of new ducks (**no cooldown** between them).\n\n"
             "**Rarities**\n"
             "- From **Common** up to **Mythic**—the higher tiers show up less often.\n\n"
             "Use `!help` anytime for commands and how things work."
@@ -328,6 +324,17 @@ async def try_consume_duck_typo(bot: commands.Bot, message: discord.Message) -> 
     return True
 
 
+@dataclass
+class _PendingBattleChallenge:
+    """In-flight `!battle @user` until accept, deny, or timeout."""
+
+    guild_id: int
+    challenger_id: str
+    defender_id: str
+    channel_id: int
+    timeout_task: asyncio.Task | None = field(default=None, repr=False)
+
+
 class DuckManager(commands.Cog, name="DuckManager"):
     """
     Duck game Cog:
@@ -345,17 +352,53 @@ class DuckManager(commands.Cog, name="DuckManager"):
         self.zay = ZayEnergy(bot, self)
         self.weather = WeatherManager()
         self.items = ItemsManager()
+        # Targeted `!battle @member`: at most one pending incoming per defender and one outgoing per challenger per guild.
+        self._pending_battle_by_defender: dict[tuple[int, str], _PendingBattleChallenge] = {}
+        self._pending_battle_by_challenger: dict[tuple[int, str], _PendingBattleChallenge] = {}
         self._init_db()
         _log("[DuckManager] initialized")
 
     async def cog_check(self, ctx: commands.Context) -> bool:
         configured_server = getattr(self.bot, "server", None)
-        if configured_server is None or ctx.guild is None:
+        if configured_server is not None and ctx.guild is not None:
+            if ctx.guild.id != configured_server:
+                return False
+
+        if ctx.command is None:
             return True
-        return ctx.guild.id == configured_server
+
+        if ctx.command.name.lower() in DUCK_INFO_COMMAND_NAMES:
+            return True
+
+        ducks_ch = getattr(self.bot, "ducks", None)
+        if ducks_ch is None:
+            return True
+
+        if ctx.guild is None:
+            await ctx.reply(
+                "Duck game commands only work in a server, in the 🦆 ducks channel.",
+                delete_after=10,
+                mention_author=False,
+            )
+            return False
+
+        if ctx.channel.id != ducks_ch:
+            await ctx.reply(
+                "Duck game commands only work in the 🦆 ducks channel. Use `!help` anywhere for rules.",
+                delete_after=8,
+                mention_author=False,
+            )
+            return False
+
+        return True
 
     def cog_unload(self):
         self.zay.cancel_all_tasks()
+        for pending in list(self._pending_battle_by_defender.values()):
+            if pending.timeout_task and not pending.timeout_task.done():
+                pending.timeout_task.cancel()
+        self._pending_battle_by_defender.clear()
+        self._pending_battle_by_challenger.clear()
         self.db.close()
 
     async def handle_duck_typo(self, message: discord.Message) -> None:
@@ -472,6 +515,21 @@ class DuckManager(commands.Cog, name="DuckManager"):
         item_labels = self.items.active_item_effect_labels(user_id)
         effects = "None" if not item_labels else ", ".join(item_labels)
         return f"*Weather: {w}*\n*Effects: {effects}*\n\n"
+
+    def _pvp_weather_effects_lines(
+        self, user_a_id: str, user_b_id: str, *, label_a: str, label_b: str
+    ) -> str:
+        """Italic weather + per-fighter item effects (same style as duck catch embed)."""
+        w = weather_catch_label(self.weather.current)
+        la = self.items.active_item_effect_labels(user_a_id)
+        lb = self.items.active_item_effect_labels(user_b_id)
+        eff_a = "None" if not la else ", ".join(la)
+        eff_b = "None" if not lb else ", ".join(lb)
+        return (
+            f"*Weather: {w}*\n"
+            f"*{label_a}: {eff_a}*\n"
+            f"*{label_b}: {eff_b}*\n\n"
+        )
 
     def _set_user(self, user_id: str, ducks_list: list[str], last_catch: int | None, cooldown: int | None):
         cur = self.db.cursor()
@@ -938,9 +996,16 @@ class DuckManager(commands.Cog, name="DuckManager"):
                         f"🔥 Brutal defense (+{margin})! <@{thief_id}> steals **{counter_duck['name']}** from {ctx.author.mention}."
                     )
 
+        ctx_lines = self._pvp_weather_effects_lines(
+            victim_id,
+            thief_id,
+            label_a=victim_name,
+            label_b=thief_name,
+        )
         embed = discord.Embed(
             title="⚔️ Revenge Duck Battle!",
             description=(
+                f"{ctx_lines}"
                 f"**{victim_name}** sends **{victim_duck['name']}** "
                 f"(⚔️ {victim_duck['attack']}  🛡️ {victim_duck['defense']}  💨 {victim_duck['speed']})\n"
                 f"vs\n"
@@ -981,7 +1046,9 @@ class DuckManager(commands.Cog, name="DuckManager"):
         commands_lines = [
             "`!duck` - Catch a duck (with cooldown).",
             "`!battle` - Your random duck vs another member's (by power); **once per UTC hour** unless you keep **winning** (streak = chain). "
-            "Winner takes the loser's fighter only if it's stealable (**not** Shiny / Legendary / Mythic).",
+            "Winner takes the loser's fighter only if it's stealable (**not** Shiny / Legendary / Mythic).\n"
+            "`!battle @member` - Challenge them; they use `!battle accept` / `!battle deny` within **90s** (only one pending battle per person at a time). "
+            "Does **not** use the random `!battle` hourly cooldown.",
             "`!ducks [@member]` - Open your/their duck dashboard.",
             "`!leaderboard` - Show top duck collectors in this server.",
             "`!give @member <duck_name>` - Transfer one of your ducks.",
@@ -1011,27 +1078,25 @@ class DuckManager(commands.Cog, name="DuckManager"):
             ),
             color=discord.Color.blurple(),
         )
-        embed.set_footer(text="Tip: Use !ducks to track your full collection.")
+        embed.set_footer(text="FishinTiffin Duck Game")
         await ctx.reply(embed=embed, mention_author=False)
 
     @commands.command(name="items")
     async def duck_items_info(self, ctx: commands.Context):
         """Explain item drops and effects."""
         embed = discord.Embed(
-            title="Items — Big Guy Protein & AriPie Energy",
+            title="Items",
             description=(
                 "**How you get them**\n"
                 "- Sometimes your `!duck` roll is an **item proc**: you receive **one** item at random "
-                "(uniform between the two). Getting the same item again **refreshes** its timer.\n\n"
+                ". Getting the same item again **refreshes** its timer.\n\n"
                 "**Big Guy Protein**\n"
                 f"- **+{BIG_GUY_STAT_BONUS}** to **attack**, **defense**, and **speed** when your duck's power is calculated "
-                "(including **`!battle`**), for **2 hours**.\n\n"
+                "for **2 hours**.\n\n"
                 "**AriPie Energy**\n"
                 f"- Your post-catch **cooldown** is divided by **{ARI_PIE_COOLDOWN_DIVISOR}** (stacks with weather), for **30 minutes**.\n\n"
-                "**Notes**\n"
-                "- Item and weather procs are skipped while **Keish's ENERGY** is active on you (see `!energies`)."
             ),
-            color=discord.Color.red(),
+            color=discord.Color.blurple(),
         )
         embed.set_footer(text="FishinTiffin Duck Game")
         await ctx.reply(embed=embed, mention_author=False)
@@ -1044,17 +1109,15 @@ class DuckManager(commands.Cog, name="DuckManager"):
             description=(
                 "**What it is**\n"
                 "- **One** weather applies to **everyone** at once. It only changes when someone's `!duck` hits a **weather proc**.\n"
-                "- The new weather is picked **at random** from the **two** possibilities that are **not** the current one.\n\n"
+                "- The new weather is picked **at random** from the possibilities that are **not** the current one.\n\n"
                 "**Normal**\n"
                 "- Default. **No** shiny or cooldown modifiers.\n\n"
                 "**Sunshine Sunflowers**\n"
                 "- **3×** shiny odds on new catches.\n\n"
                 "**Jerm Cloud**\n"
-                "- **2×** longer **catch cooldowns** for everyone.\n\n"
-                "**Flavour**\n"
-                "- Ashley / Jerm themed announcements when the weather shifts, same as in-channel cards."
+                "- **1.5×** longer **catch cooldowns** for everyone (+50%)."
             ),
-            color=discord.Color.light_grey(),
+            color=WEATHER_EMBED_COLOR,
         )
         embed.set_footer(text="FishinTiffin Duck Game")
         await ctx.reply(embed=embed, mention_author=False)
@@ -1065,43 +1128,97 @@ class DuckManager(commands.Cog, name="DuckManager"):
         d1, d2, d3 = ZAY_DEFENSE_PROBS
         pct1, pct2, pct3 = int(round(d1 * 100)), int(round(d2 * 100)), int(round(d3 * 100))
         embed = discord.Embed(
-            title="Energies — Keish & Zay",
+            title="Energies",
             description=(
                 "**Keish's ENERGY**\n"
                 "- Rare **`!duck` proc**: standalone message (no catch that command).\n"
-                f"- For **{BLESSING_DURATION_SECONDS}** seconds your **`!duck` cooldown is ignored**; timers in the UI use **half** "
-                f"of the real window (~**{BLESSING_DISPLAY_SECONDS}**s of “display” time).\n"
+                f"- You get **{KEISH_FLOCK_ROLLS}** special **`!duck`** pulls: each time, **he** nets a **flock** of "
+                "new ducks at once, with **no cooldown** between those pulls.\n"
                 "- **Cannot** overlap **Zay's ENERGY** on you (and vice versa).\n"
-                "- While Keish is active on you, **weather** and **item** procs from `!duck` are skipped.\n\n"
+                "- While **he** still owes you flock pulls, **weather** and **item** procs from `!duck` are skipped.\n\n"
                 "**Zay's ENERGY**\n"
                 "- Rare **`!duck` proc**: standalone event — he targets **your collection**.\n"
                 "- Use **`!duck`** up to **three** times; each use is **one defense round** with its own success chance "
                 f"(**{pct1}%**, then **{pct2}%**, then **{pct3}%**).\n"
+                "- **The more** you **defend**, the **less** he **steals**.\n"
                 "- **Fail once** → **steal finale**: he can remove multiple ducks in one go (scaled to how many he could take at the start). "
                 "Only **Legendary** and **Mythic** ducks are **never** taken.\n"
                 "- **Win all three** → full-defense finale; you cannot `!battle` until the encounter is over.\n"
                 "- Finish Zay (win or lose) before **`!battle`** works again."
             ),
-            color=discord.Color.dark_purple(),
+            color=discord.Color.blurple(),
         )
         embed.set_footer(text="FishinTiffin Duck Game")
         await ctx.reply(embed=embed, mention_author=False)
+
+    async def _handle_keish_flock_catch(self, ctx: commands.Context, user_id: str) -> None:
+        """One of three Keish flock pulls: 3–7 new ducks, random success art, no outcome roll."""
+        n = random.randint(KEISH_FLOCK_MIN, KEISH_FLOCK_MAX)
+        ctx_lines = self._duck_catch_weather_effects_lines(user_id)
+        lines: list[str] = []
+        try:
+            for _ in range(n):
+                url, ts = await self._fetch_duck_url()
+                duck_id = _generate_duck_id()
+                _log(f"[duck] keish flock url={url} -> duck_id={duck_id}")
+                duck_row = self._create_duck_record(duck_id, url, ts)
+                self._add_duck_to_user(user_id, duck_id)
+                self._set_duck_owner(duck_id, user_id)
+                rarity = duck_row["rarity"]
+                shiny = " ✨" if duck_row["shiny"] else ""
+                lines.append(f"• **{duck_row['name']}** — {rarity}{shiny}")
+        except Exception as e:
+            _log(f"[duck] keish flock ERROR: {e}")
+            await ctx.reply("He lost the net mid-haul—try **`!duck`** again in a moment.", mention_author=False)
+            return
+
+        self.keish.consume_one_roll(user_id)
+        remaining = self.keish.flock_rolls_remaining(user_id)
+        if remaining > 0:
+            status_msg = f"**{remaining}** flock pull(s) left—**`!duck`** again (**no cooldown**)."
+        else:
+            cd = self._update_cooldown(user_id)
+            status_msg = (
+                f"His rush is over. Next catch in **{_fmt_duration(cd)}**."
+                if cd <= COOLDOWN_MEAN
+                else f"His rush is over. You're winded—next catch in **{_fmt_duration(cd)}**."
+            )
+
+        duck_word = "duck" if n == 1 else "ducks"
+        footer_text = f"**{n}** {duck_word} caught this pull."
+
+        flock_head = "**1** new duck joined your flock:" if n == 1 else f"**{n}** new ducks joined your flock:"
+        desc = f"{ctx_lines}{status_msg}\n\n{flock_head}\n" + "\n".join(lines)
+        embed = discord.Embed(
+            title=KEISH_FLOCK_CATCH_TITLE,
+            description=desc,
+            color=discord.Color.gold(),
+        )
+        embed.set_footer(text=footer_text)
+
+        img_path = pick_keish_success_image_path()
+        file_obj: discord.File | None = None
+        if img_path is not None and img_path.is_file():
+            file_obj = discord.File(img_path, filename=img_path.name)
+            embed.set_image(url=f"attachment://{img_path.name}")
+
+        try:
+            if file_obj is not None:
+                await ctx.reply(embed=embed, file=file_obj, mention_author=False)
+            else:
+                await ctx.reply(embed=embed, mention_author=False)
+        except discord.HTTPException as e:
+            LOGGER.info("[duck] keish flock reply failed: %s", e)
 
     @commands.command(name="duck")
     async def duck(self, ctx: commands.Context):
         """
         Catch a duck via the Duck API.
         - Each catch creates or steals a duck; per-user cooldown unless Keish's or Zay's ENERGY is active.
-        - Keish proc: announcement embed + keish_energy.gif; windowed snag/saddle titles on further catches.
-        - Zay proc: standalone event (no duck this command); zay_energy.gif; up to three !duck defenses; clash / finale assets.
+        - Keish proc: announcement + three flock pulls (each 3–7 new ducks, random success art, no cooldown between pulls).
+        - Zay proc: standalone event (no duck this command); assets/zay_energy/zay_energy.gif; up to three !duck defenses; clash / finale assets in that folder.
         - Announces catch + attributes (+ theft mention) and cooldown message.
         """
-        # Restrict execution to the ducks channel
-        if ctx.channel.id != self.bot.ducks:
-            return await ctx.reply(
-                "This command can only be used in the 🦆 ducks channel.", delete_after=5
-            )
-        
         try:
             pending_revenge = self._get_pending_revenge(str(ctx.author.id))
             if pending_revenge:
@@ -1120,19 +1237,23 @@ class DuckManager(commands.Cog, name="DuckManager"):
                 await ctx.reply(f"⏳ You’re still recovering! Next catch in **{_fmt_duration(remaining)}**.")
                 return
 
+            if self.keish.active(new_owner_id):
+                await self._handle_keish_flock_catch(ctx, new_owner_id)
+                return
+
             allow_zay_proc = (
                 ctx.guild
                 and not self.zay.active(new_owner_id)
                 and not self.keish.active(new_owner_id)
             )
             allow_keish_proc = not self.zay.active(new_owner_id) and not self.keish.active(new_owner_id)
-            keish_energy_now = self.keish.active(new_owner_id)
+            # Keish flock pulls return above while active, so weather/item/boot are never suppressed here.
             outcome = _roll_duck_outcome(
                 allow_zay_proc=bool(allow_zay_proc),
                 allow_keish_proc=allow_keish_proc,
-                allow_weather_proc=not keish_energy_now,
-                allow_item_proc=not keish_energy_now,
-                allow_boot=not keish_energy_now,
+                allow_weather_proc=True,
+                allow_item_proc=True,
+                allow_boot=True,
             )
 
             # Zay's ENERGY proc: standalone event (no boot/catch/steal this command), like Keish's own card + GIF.
@@ -1157,20 +1278,16 @@ class DuckManager(commands.Cog, name="DuckManager"):
             # Keish's ENERGY proc: standalone event (no boot/catch/steal this command).
             if outcome == "keish_proc":
                 self.keish.grant(new_owner_id)
-                cd_msg = (
-                    f"✨ **Keish's ENERGY** lasts **{BLESSING_DISPLAY_SECONDS} seconds**—`!duck` ignores cooldown until it fades. "
-                    "Your next catch after that sets a normal cooldown."
-                )
                 embed = discord.Embed(
                     title=KEISH_PROC_TITLE,
-                    description=blessing_proc_description(),
+                    description=keish_proc_description(),
                     color=discord.Color.gold(),
                 )
                 keish_energy_file = None
                 if KEISH_ENERGY_GIF_PATH.is_file():
                     keish_energy_file = discord.File(KEISH_ENERGY_GIF_PATH, filename="keish_energy.gif")
                     embed.set_image(url="attachment://keish_energy.gif")
-                embed.set_footer(text=cd_msg)
+                embed.set_footer(text="**0** ducks caught — **`!duck`** runs each flock pull.")
                 if keish_energy_file:
                     await ctx.reply(embed=embed, file=keish_energy_file, mention_author=False)
                 else:
@@ -1247,9 +1364,14 @@ class DuckManager(commands.Cog, name="DuckManager"):
                     self._set_duck_owner(duck_id, new_owner_id)
                     # Victim gets immediate !duck access for revenge.
                     self._refresh_user_cooldown(prev_owner_id)
+                    victim_m = ctx.guild.get_member(int(prev_owner_id)) if ctx.guild else None
+                    thief_m = ctx.guild.get_member(int(new_owner_id)) if ctx.guild else None
+                    victim_dn = victim_m.display_name if victim_m else f"User {prev_owner_id}"
+                    thief_dn = thief_m.display_name if thief_m else f"User {new_owner_id}"
                     theft_text = (
-                        f"\n⚠️ <@{prev_owner_id}> — your duck **{duck_row['name']}** was stolen!\n"
-                        "🌀 Your cooldown has been refreshed. Use `!duck` within **5 minutes** to trigger revenge."
+                        f"\n⚠️ **{victim_dn}**'s duck **{duck_row['name']}** was stolen by **{thief_dn}**.\n"
+                        f"🌀 **{victim_dn}**'s catch cooldown was refreshed. **{victim_dn}** can use `!duck` within "
+                        "**5 minutes** to trigger revenge."
                     )
                     self._set_pending_revenge(
                         victim_id=prev_owner_id,
@@ -1270,18 +1392,13 @@ class DuckManager(commands.Cog, name="DuckManager"):
                 self._add_duck_to_user(new_owner_id, duck_id)
                 self._set_duck_owner(duck_id, new_owner_id)
 
-            # 4) Keish blessing window (from a prior proc)
-            blessing_now = self.keish.active(new_owner_id)
-            if blessing_now:
-                rem_disp = self.keish.remaining_display(new_owner_id)
-                cd_msg = f"✨ Keish's ENERGY active—**{rem_disp}s** left; **no `!duck` cooldown** until it ends."
-            else:
-                cd = self._update_cooldown(new_owner_id)
-                cd_msg = (
-                    f"Your energy is preserved! Next catch available in: **{_fmt_duration(cd)}**."
-                    if cd <= COOLDOWN_MEAN
-                    else f"You're feeling a bit tired... Next catch available in: **{_fmt_duration(cd)}**."
-                )
+            # 4) Cooldown after a normal catch (Keish flock pulls handle their own cooldown)
+            cd = self._update_cooldown(new_owner_id)
+            cd_msg = (
+                f"Your energy is preserved! Next catch available in: **{_fmt_duration(cd)}**."
+                if cd <= COOLDOWN_MEAN
+                else f"You're feeling a bit tired... Next catch available in: **{_fmt_duration(cd)}**."
+            )
 
             # 5) flavor + attributes message
             rarity = duck_row["rarity"]
@@ -1292,30 +1409,18 @@ class DuckManager(commands.Cog, name="DuckManager"):
             flair = RARITY_CATCH_FLAIR[rarity]
             ctx_lines = self._duck_catch_weather_effects_lines(new_owner_id)
 
-            if blessing_now:
-                # Blessing window: full duck card with Keish-themed titles.
-                color = RARITY_EMBED_COLORS.get(rarity, discord.Color.dark_grey())
-                title = KEISH_SADDLE_TITLE if shiny else KEISH_SNAG_TITLE
-                catch_body = (
-                    f"{flair}\n\n"
-                    f"{ctx_lines}"
-                    f"**Name:** {name}\n"
-                    f"**Rarity:** {rarity}{' ✨' if shiny else ''}\n"
-                    f"**Stats:** ⚔️ {atk}  🛡️ {dfs}  💨 {spd}\n"
-                )
-            else:
-                color = RARITY_EMBED_COLORS.get(rarity, discord.Color.dark_grey())
-                title = (
-                    f"{'🌟✨ Shiny Duck Appeared! ✨🌟 ' if shiny else ''}"
-                    f"Congrats on your new duck!{' SO SHINY!' if shiny else ''}"
-                )
-                catch_body = (
-                    f"{flair}\n\n"
-                    f"{ctx_lines}"
-                    f"**Name:** {name}\n"
-                    f"**Rarity:** {rarity}{' ✨' if shiny else ''}\n"
-                    f"**Stats:** ⚔️ {atk}  🛡️ {dfs}  💨 {spd}\n"
-                )
+            color = RARITY_EMBED_COLORS.get(rarity, discord.Color.dark_grey())
+            title = (
+                f"{'🌟✨ Shiny Duck Appeared! ✨🌟 ' if shiny else ''}"
+                f"Congrats on your new duck!{' SO SHINY!' if shiny else ''}"
+            )
+            catch_body = (
+                f"{flair}\n\n"
+                f"{ctx_lines}"
+                f"**Name:** {name}\n"
+                f"**Rarity:** {rarity}{' ✨' if shiny else ''}\n"
+                f"**Stats:** ⚔️ {atk}  🛡️ {dfs}  💨 {spd}\n"
+            )
 
             embed = discord.Embed(
                 title=title,
@@ -1408,57 +1513,11 @@ class DuckManager(commands.Cog, name="DuckManager"):
             lines.append(f"{medal} **{member.display_name}** — {duck_label}")
 
         embed = discord.Embed(
-            title="🏆 Duck Leaderboard 🏆",
+            title="🏆 Duck Leaderboard — PreSeason 🏆",
             description="\n".join(lines),
             color=discord.Color.gold()
         )
         embed.set_footer(text=f"Total ducks caught in the server: {total_ducks}")
-
-        await ctx.reply(embed=embed)
-    
-    @commands.command(name="showcase")
-    async def showcase_duck(self, ctx: commands.Context, *, duck_name: str):
-        """Showcase any duck by name (shows owner, rarity, stats, age, and image)."""
-        row = self._get_owned_duck_row_by_name(str(ctx.author.id), duck_name)
-        if not row:
-            cur = self.db.cursor()
-            cur.execute(
-                "SELECT * FROM ducks WHERE name = ? ORDER BY duck_id LIMIT 1",
-                (duck_name,),
-            )
-            row = cur.fetchone()
-
-        if not row:
-            await ctx.reply(f"No duck named **{duck_name}** was found.")
-            return
-
-        # Owner info
-        owner_id = row["owner_id"]
-        if owner_id:
-            member = ctx.guild.get_member(int(owner_id))
-            owner_name = member.display_name if member else f"User {owner_id}"
-        else:
-            owner_name = "Unowned"
-
-        color = RARITY_EMBED_COLORS.get(row["rarity"], discord.Color.dark_grey())
-
-        shiny = bool(row["shiny"])
-
-        age_str = _fmt_age_ago(row["timestamp"])
-
-        # Embed
-        embed = discord.Embed(
-            title=f"{'✨ ' if shiny else ''}{row['name']}{' ✨' if shiny else ''}",
-            description=(
-                f"**Owner:** {owner_name}\n"
-                f"**Rarity:** {row['rarity']}{' ✨' if shiny else ''}\n"
-                f"**Stats:** ⚔️ {row['attack']}  🛡️ {row['defense']}  💨 {row['speed']}\n"
-                f"**Caught:** {age_str}"
-            ),
-            color=color
-        )
-        embed.set_image(url=row["url"])
-        embed.set_footer(text="Duck Showcase")
 
         await ctx.reply(embed=embed)
 
@@ -1562,20 +1621,172 @@ class DuckManager(commands.Cog, name="DuckManager"):
             f"to {member.mention}!"
         )
 
-    @commands.command(name="battle")
-    async def duck_battle(self, ctx: commands.Context):
-        """Random PvP battle: any of your ducks vs another member's. Winner takes the loser's fighter
-        only if it could be stolen (!duck theft rules: not Shiny / Legendary / Mythic).
+    def _clear_pending_battle_challenge(self, pending: _PendingBattleChallenge) -> bool:
+        key_d = (pending.guild_id, pending.defender_id)
+        key_c = (pending.guild_id, pending.challenger_id)
+        if self._pending_battle_by_defender.get(key_d) is not pending:
+            return False
+        del self._pending_battle_by_defender[key_d]
+        del self._pending_battle_by_challenger[key_c]
+        if pending.timeout_task and not pending.timeout_task.done():
+            pending.timeout_task.cancel()
+        return True
 
-        One battle per UTC hour; a win grants a streak bypass so you can chain as long as you keep winning.
+    async def _pending_battle_timeout_worker(self, pending: _PendingBattleChallenge) -> None:
+        try:
+            await asyncio.sleep(BATTLE_CHALLENGE_TIMEOUT_SECONDS)
+        except asyncio.CancelledError:
+            return
+        if not self._clear_pending_battle_challenge(pending):
+            return
+        channel = self.bot.get_channel(pending.channel_id)
+        if channel is None:
+            try:
+                ch = await self.bot.fetch_channel(pending.channel_id)
+            except discord.HTTPException:
+                ch = None
+            channel = ch
+        if isinstance(channel, discord.abc.Messageable):
+            try:
+                await channel.send(
+                    f"⏱️ Battle challenge timed out ({BATTLE_CHALLENGE_TIMEOUT_SECONDS}s): "
+                    f"<@{pending.challenger_id}> vs <@{pending.defender_id}>."
+                )
+            except discord.HTTPException:
+                pass
+
+    async def _run_duck_battle_fight(
+        self,
+        ctx: commands.Context,
+        challenger_id: str,
+        opponent_id: str,
+        *,
+        challenger_member: discord.Member | None = None,
+        uses_ranked_battle_cooldown: bool = True,
+    ) -> None:
+        """Resolve PvP: random fighter from each side; challenger is ``challenger_id``.
+
+        When ``uses_ranked_battle_cooldown`` is True, updates the challenger's UTC-hour `!battle` bucket / streak.
+        Targeted accepts pass False so random `!battle` limits stay separate.
         """
+        challenger_duck_id = self._get_random_duck_from_user(challenger_id)
+        opponent_duck_id = self._get_random_duck_from_user(opponent_id)
+        if not challenger_duck_id or not opponent_duck_id:
+            await ctx.reply("Battle aborted: one side has no ducks left to battle with.")
+            return
+
+        challenger_duck = self._get_duck(challenger_duck_id)
+        opponent_duck = self._get_duck(opponent_duck_id)
+        if not challenger_duck or not opponent_duck:
+            await ctx.reply("Battle aborted: missing duck data.")
+            return
+
+        guild = ctx.guild
+        challenger_name = (
+            challenger_member.display_name
+            if challenger_member is not None
+            else (
+                guild.get_member(int(challenger_id)).display_name
+                if guild and guild.get_member(int(challenger_id))
+                else f"User {challenger_id}"
+            )
+        )
+        opponent_m = guild.get_member(int(opponent_id)) if guild else None
+        opponent_name = (
+            opponent_m.display_name if opponent_m else f"User {opponent_id}"
+        )
+
+        cp = self._duck_power(challenger_duck, owner_id=challenger_id)
+        op = self._duck_power(opponent_duck, owner_id=opponent_id)
+        if cp == op:
+            if random.random() < 0.5:
+                cp += 1
+            else:
+                op += 1
+        margin = abs(cp - op)
+
+        challenger_wins = cp > op
+        winner_name = challenger_duck["name"] if challenger_wins else opponent_duck["name"]
+        loser_name = opponent_duck["name"] if challenger_wins else challenger_duck["name"]
+        flavor = self._random_battle_flavor(winner_name=winner_name, loser_name=loser_name, margin=margin)
+
+        bucket = self._battle_hour_bucket_now() if uses_ranked_battle_cooldown else None
+        if challenger_wins:
+            if uses_ranked_battle_cooldown and bucket is not None:
+                self._set_battle_state(challenger_id, bucket, streak=True)
+            if self._is_stealable_duck(opponent_duck):
+                self._remove_duck_from_user(opponent_id, opponent_duck_id)
+                self._add_duck_to_user(challenger_id, opponent_duck_id)
+                self._set_duck_owner(opponent_duck_id, challenger_id)
+                outcome_line = (
+                    f"🏆 **{challenger_name}** wins! **{challenger_name}** takes **{opponent_duck['name']}** "
+                    f"from **{opponent_name}**."
+                )
+            else:
+                outcome_line = (
+                    f"🏆 **{challenger_name}** wins the fight! **{opponent_duck['name']}** is "
+                    f"**Shiny**, **Legendary**, or **Mythic** — it stays with **{opponent_name}**."
+                )
+            title = "⚔️ Duck Battle — Victory!"
+            color = discord.Color.green()
+            if uses_ranked_battle_cooldown:
+                footer = (
+                    "You won — `!battle` again now to keep rolling, or stop anytime. "
+                    "One battle per hour, win streaks keep you alive!"
+                )
+            else:
+                footer = "Targeted battle — does not affect the random `!battle` hourly limit."
+        else:
+            if uses_ranked_battle_cooldown and bucket is not None:
+                self._set_battle_state(challenger_id, bucket, streak=False)
+            if self._is_stealable_duck(challenger_duck):
+                self._remove_duck_from_user(challenger_id, challenger_duck_id)
+                self._add_duck_to_user(opponent_id, challenger_duck_id)
+                self._set_duck_owner(challenger_duck_id, opponent_id)
+                outcome_line = (
+                    f"💔 **{opponent_name}** wins! **{opponent_name}** takes **{challenger_duck['name']}** "
+                    f"from **{challenger_name}**."
+                )
+            else:
+                outcome_line = (
+                    f"💔 **{opponent_name}** wins the fight! **{challenger_duck['name']}** is protected "
+                    f"(Shiny / Legendary / Mythic) and stays with **{challenger_name}**."
+                )
+            title = "⚔️ Duck Battle — Defeat"
+            color = discord.Color.red()
+            if uses_ranked_battle_cooldown:
+                footer = (
+                    "One battle per hour, win streaks keep you alive! "
+                    "`!battle` again after a win, or wait for the next hour if you lost."
+                )
+            else:
+                footer = "Targeted battle — does not affect the random `!battle` hourly limit."
+
+        battle_ctx = self._pvp_weather_effects_lines(
+            challenger_id,
+            opponent_id,
+            label_a=challenger_name,
+            label_b=opponent_name,
+        )
+        description = (
+            f"{battle_ctx}"
+            f"**{challenger_name}** sends **{challenger_duck['name']}** "
+            f"(⚔️ {challenger_duck['attack']}  🛡️ {challenger_duck['defense']}  💨 {challenger_duck['speed']})\n"
+            f"vs\n"
+            f"**{opponent_name}** sends **{opponent_duck['name']}** "
+            f"(⚔️ {opponent_duck['attack']}  🛡️ {opponent_duck['defense']}  💨 {opponent_duck['speed']})\n\n"
+            f"{flavor}\n\n"
+            f"{outcome_line}"
+        )
+
+        embed = discord.Embed(title=title, description=description, color=color)
+        embed.set_footer(text=footer)
+        await ctx.reply(embed=embed)
+
+    async def _battle_random(self, ctx: commands.Context) -> None:
         if ctx.guild is None:
             await ctx.reply("Battles can only be used in a server.", mention_author=True)
             return
-        if ctx.channel.id != self.bot.ducks:
-            return await ctx.reply(
-                "This command can only be used in the 🦆 ducks channel.", delete_after=5
-            )
 
         user_id = str(ctx.author.id)
 
@@ -1604,82 +1815,166 @@ class DuckManager(commands.Cog, name="DuckManager"):
             await ctx.reply("Nobody else in this server has a duck you can battle against (yet).")
             return
 
-        opponent_id, opponent_duck_id = opp
-        challenger_duck = self._get_duck(challenger_duck_id)
-        opponent_duck = self._get_duck(opponent_duck_id)
-        if not challenger_duck or not opponent_duck:
-            await ctx.reply("Battle aborted: missing duck data.")
-            return
-
-        cp = self._duck_power(challenger_duck, owner_id=user_id)
-        op = self._duck_power(opponent_duck, owner_id=opponent_id)
-        if cp == op:
-            if random.random() < 0.5:
-                cp += 1
-            else:
-                op += 1
-        margin = abs(cp - op)
-
-        challenger_wins = cp > op
-        winner_name = challenger_duck["name"] if challenger_wins else opponent_duck["name"]
-        loser_name = opponent_duck["name"] if challenger_wins else challenger_duck["name"]
-        flavor = self._random_battle_flavor(winner_name=winner_name, loser_name=loser_name, margin=margin)
-
-        bucket = self._battle_hour_bucket_now()
-        if challenger_wins:
-            self._set_battle_state(user_id, bucket, streak=True)
-            if self._is_stealable_duck(opponent_duck):
-                self._remove_duck_from_user(opponent_id, opponent_duck_id)
-                self._add_duck_to_user(user_id, opponent_duck_id)
-                self._set_duck_owner(opponent_duck_id, user_id)
-                outcome_line = (
-                    f"🏆 {ctx.author.mention} wins! You take **{opponent_duck['name']}** from <@{opponent_id}>."
-                )
-            else:
-                outcome_line = (
-                    f"🏆 {ctx.author.mention} wins the fight! **{opponent_duck['name']}** is "
-                    "**Shiny**, **Legendary**, or **Mythic** — it stays with <@{opponent_id}>."
-                )
-            title = "⚔️ Duck Battle — Victory!"
-            color = discord.Color.green()
-            footer = (
-                "You won — `!battle` again now to keep rolling, or stop anytime. "
-                "One battle per hour, win streaks keep you alive!"
-            )
-        else:
-            self._set_battle_state(user_id, bucket, streak=False)
-            if self._is_stealable_duck(challenger_duck):
-                self._remove_duck_from_user(user_id, challenger_duck_id)
-                self._add_duck_to_user(opponent_id, challenger_duck_id)
-                self._set_duck_owner(challenger_duck_id, opponent_id)
-                outcome_line = (
-                    f"💔 <@{opponent_id}> wins! They take **{challenger_duck['name']}** from you."
-                )
-            else:
-                outcome_line = (
-                    f"💔 <@{opponent_id}> wins the fight! **{challenger_duck['name']}** is protected "
-                    "(Shiny / Legendary / Mythic) and stays with you."
-                )
-            title = "⚔️ Duck Battle — Defeat"
-            color = discord.Color.red()
-            footer = (
-                "One battle per hour, win streaks keep you alive! "
-                "`!battle` again after a win, or wait for the next hour if you lost."
-            )
-
-        description = (
-            f"{ctx.author.mention} sends **{challenger_duck['name']}** "
-            f"(⚔️ {challenger_duck['attack']}  🛡️ {challenger_duck['defense']}  💨 {challenger_duck['speed']})\n"
-            f"vs\n"
-            f"<@{opponent_id}> sends **{opponent_duck['name']}** "
-            f"(⚔️ {opponent_duck['attack']}  🛡️ {opponent_duck['defense']}  💨 {opponent_duck['speed']})\n\n"
-            f"{flavor}\n\n"
-            f"{outcome_line}"
+        opponent_id, _ = opp
+        await self._run_duck_battle_fight(
+            ctx,
+            user_id,
+            opponent_id,
+            challenger_member=ctx.author,
         )
 
-        embed = discord.Embed(title=title, description=description, color=color)
-        embed.set_footer(text=footer)
-        await ctx.reply(embed=embed)
+    async def _battle_issue_challenge(self, ctx: commands.Context, opponent: discord.Member) -> None:
+        if ctx.guild is None:
+            await ctx.reply("Battles can only be used in a server.", mention_author=True)
+            return
+
+        challenger_id = str(ctx.author.id)
+        defender_id = str(opponent.id)
+
+        if challenger_id == defender_id:
+            await ctx.reply("You can't battle yourself.")
+            return
+        if opponent.bot:
+            await ctx.reply("Pick a human server member to challenge.")
+            return
+
+        if self.zay.active(challenger_id):
+            await ctx.reply("⚠️ Finish **Zay's ENERGY** with `!duck` before battling.")
+            return
+
+        if not self._get_random_duck_from_user(challenger_id):
+            await ctx.reply("You need at least one duck to battle with.")
+            return
+        if not self._get_random_duck_from_user(defender_id):
+            await ctx.reply(f"{opponent.mention} doesn't have any ducks to battle with.")
+            return
+
+        guild_id = ctx.guild.id
+        if (guild_id, defender_id) in self._pending_battle_by_defender:
+            await ctx.reply(
+                f"{opponent.mention} already has a pending battle to answer. Try again later."
+            )
+            return
+        if (guild_id, challenger_id) in self._pending_battle_by_challenger:
+            await ctx.reply(
+                "You already have a pending battle challenge. Wait for accept, deny, or timeout."
+            )
+            return
+
+        allowed_ids = await self._guild_member_ids(ctx.guild)
+        if allowed_ids is not None:
+            if defender_id not in allowed_ids:
+                await ctx.reply("That member isn't in this server (or member list isn't loaded yet).")
+                return
+            if challenger_id not in allowed_ids:
+                await ctx.reply("Battle aborted: couldn't verify you're in this server.")
+                return
+
+        pending = _PendingBattleChallenge(
+            guild_id=guild_id,
+            challenger_id=challenger_id,
+            defender_id=defender_id,
+            channel_id=ctx.channel.id,
+        )
+        self._pending_battle_by_defender[(guild_id, defender_id)] = pending
+        self._pending_battle_by_challenger[(guild_id, challenger_id)] = pending
+        pending.timeout_task = asyncio.create_task(self._pending_battle_timeout_worker(pending))
+
+        await ctx.reply(
+            f"⚔️ {ctx.author.mention} challenges {opponent.mention} to a duck battle!\n"
+            f"{opponent.mention}: type `!battle accept` or `!battle deny` within "
+            f"**{BATTLE_CHALLENGE_TIMEOUT_SECONDS}** seconds."
+        )
+
+    @commands.group(name="battle", invoke_without_command=True)
+    async def duck_battle(self, ctx: commands.Context, opponent: discord.Member | None = None):
+        """Random PvP battle, or `!battle @member` to challenge (they accept/deny within 90s).
+
+        Winner takes the loser's fighter only if it could be stolen (!duck theft rules: not Shiny / Legendary / Mythic).
+        Random `!battle` uses the challenger's UTC-hour limit + win streak; targeted battles do not.
+        """
+        if ctx.invoked_subcommand is not None:
+            return
+        if opponent is None:
+            await self._battle_random(ctx)
+        else:
+            await self._battle_issue_challenge(ctx, opponent)
+
+    @duck_battle.command(name="accept")
+    async def duck_battle_accept(self, ctx: commands.Context):
+        """Accept a pending duck battle challenge (defender only)."""
+        if ctx.guild is None:
+            await ctx.reply("Battles can only be used in a server.", mention_author=True)
+            return
+
+        defender_id = str(ctx.author.id)
+        guild_id = ctx.guild.id
+        pending = self._pending_battle_by_defender.get((guild_id, defender_id))
+        if pending is None:
+            await ctx.reply("You don't have a pending battle to accept.")
+            return
+
+        challenger_id = pending.challenger_id
+        if not self._clear_pending_battle_challenge(pending):
+            await ctx.reply("That challenge is no longer active.")
+            return
+
+        challenger = ctx.guild.get_member(int(challenger_id))
+        if challenger is None:
+            try:
+                challenger = await ctx.guild.fetch_member(int(challenger_id))
+            except discord.HTTPException:
+                challenger = None
+        if challenger is None:
+            await ctx.reply("Battle aborted: challenger is no longer in this server.")
+            return
+
+        if self.zay.active(challenger_id):
+            await ctx.reply("⚠️ Challenger must finish **Zay's ENERGY** with `!duck` before this battle can run.")
+            return
+
+        if not self._get_random_duck_from_user(challenger_id):
+            await ctx.reply("Battle aborted: challenger has no ducks left.")
+            return
+        if not self._get_random_duck_from_user(defender_id):
+            await ctx.reply("Battle aborted: you have no ducks left.")
+            return
+
+        allowed_ids = await self._guild_member_ids(ctx.guild)
+        if allowed_ids is not None:
+            if defender_id not in allowed_ids or challenger_id not in allowed_ids:
+                await ctx.reply("Battle aborted: member list couldn't be verified.")
+                return
+
+        await self._run_duck_battle_fight(
+            ctx,
+            challenger_id,
+            defender_id,
+            challenger_member=challenger,
+            uses_ranked_battle_cooldown=False,
+        )
+
+    @duck_battle.command(name="deny")
+    async def duck_battle_deny(self, ctx: commands.Context):
+        """Decline a pending duck battle challenge (defender only)."""
+        if ctx.guild is None:
+            await ctx.reply("Battles can only be used in a server.", mention_author=True)
+            return
+
+        defender_id = str(ctx.author.id)
+        guild_id = ctx.guild.id
+        pending = self._pending_battle_by_defender.get((guild_id, defender_id))
+        if pending is None:
+            await ctx.reply("You don't have a pending battle to deny.")
+            return
+
+        if not self._clear_pending_battle_challenge(pending):
+            await ctx.reply("That challenge is no longer active.")
+            return
+
+        await ctx.reply(
+            f"🙅 {ctx.author.mention} declined the battle from <@{pending.challenger_id}>."
+        )
 
     @commands.command(name="release")
     async def release_duck(self, ctx: commands.Context, *, duck_name: str):

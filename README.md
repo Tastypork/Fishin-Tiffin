@@ -12,7 +12,6 @@ Standalone Discord bot containing all duck gameplay capabilities extracted from 
   - 35% theft mechanic (steal random duck from another user)
 - `!ducks [@member]` personal duck dashboard link generation
 - `!leaderboard` top collectors leaderboard
-- `!showcase <duck_name>` full duck detail card
 - `!give @member <duck_name>` duck transfer between users
 - reaction-role listeners on `🦆` for onboarding messages created by the bot
 - SQLite-backed storage for ducks/users with auto migration for legacy schema

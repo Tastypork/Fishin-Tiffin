@@ -22,6 +22,9 @@ JERM_CLOUD = "jerm_cloud"
 
 ALL_WEATHERS = (NORMAL, SUNSHINE_SUNFLOWERS, JERM_CLOUD)
 
+# Sidebar color for every weather-related embed (procs and `!weathers`).
+WEATHER_EMBED_COLOR = discord.Color.blurple()
+
 # Short labels for catch cards (`!duck` embeds).
 WEATHER_CATCH_LABELS: dict[str, str] = {
     NORMAL: "Normal",
@@ -38,17 +41,14 @@ _WEATHER_COPY = {
     NORMAL: (
         "Normal weather has been activated",
         "Oh... that's... boring. Nothing is different.",
-        discord.Color.light_grey(),
     ),
     SUNSHINE_SUNFLOWERS: (
         "Ashley brings good weather",
         "Ashley's Sunny Sunflowers allows for higher chances of shinies to be caught.",
-        discord.Color.gold(),
     ),
     JERM_CLOUD: (
         "Jerm brings in terrible weather",
-        "Jerm and his many clones bring in terrible weather, doubling all the cooldowns of all catches.",
-        discord.Color.dark_grey(),
+        "Jerm and his many clones bring in terrible weather, increasing all catch cooldowns by 50%.",
     ),
 }
 
@@ -76,12 +76,12 @@ class WeatherManager:
         return 3.0 if self._current == SUNSHINE_SUNFLOWERS else 1.0
 
     def cooldown_multiplier(self) -> float:
-        return 2.0 if self._current == JERM_CLOUD else 1.0
+        return 1.5 if self._current == JERM_CLOUD else 1.0
 
     @staticmethod
     def build_proc_embed(weather_id: str) -> tuple[discord.Embed, discord.File | None]:
-        title, description, color = _WEATHER_COPY[weather_id]
-        embed = discord.Embed(title=title, description=description, color=color)
+        title, description = _WEATHER_COPY[weather_id]
+        embed = discord.Embed(title=title, description=description, color=WEATHER_EMBED_COLOR)
         asset_path: Path = WEATHER_DIR / f"{weather_id}.png"
         file_obj: discord.File | None = None
         if asset_path.is_file():

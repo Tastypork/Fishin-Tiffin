@@ -1,53 +1,65 @@
 """
-Keish's ENERGY — rare proc, short window with no !duck cooldown (display uses half of real remaining).
+Keish's ENERGY — rare proc, then three special !duck pulls (each adds several new ducks).
 """
 
-from .duck_clock import utc_ts
+import random
+from pathlib import Path
+
 from .paths import ASSETS_DIR
 
-BLESSING_PROB = 0.01
-BLESSING_DURATION_SECONDS = 20
-BLESSING_DISPLAY_SECONDS = BLESSING_DURATION_SECONDS // 2
-KEISH_ENERGY_GIF_PATH = ASSETS_DIR / "keish_energy.gif"
+KEISH_ENERGY_DIR = ASSETS_DIR / "keish_energy"
+KEISH_ENERGY_GIF_PATH = KEISH_ENERGY_DIR / "keish_energy.gif"
 
-KEISH_PROC_TITLE = "A wild Keish appears! SPAM DUCK!!!"
-KEISH_SNAG_TITLE = "😮 Keish Snags A Duck From The Sky For You!"
-KEISH_SADDLE_TITLE = "✨😮 Keish Saddles A Shiny Duck For You! ✨"
+KEISH_FLOCK_ROLLS = 3
+KEISH_FLOCK_MIN = 3
+KEISH_FLOCK_MAX = 7
+
+KEISH_SUCCESS_FILENAMES = (
+    "keish_success.png",
+    "keish_success1.png",
+    "keish_success2.png",
+)
+
+KEISH_PROC_TITLE = "A wild Keish appears!"
+KEISH_FLOCK_CATCH_TITLE = "Keish snags a flock of ducks for you!"
 
 
-def blessing_proc_description() -> str:
+def keish_proc_description() -> str:
     return (
-        "The water stills—then the **spirit of thrill** sparks along your spine. "
-        f"**No `!duck` cooldowns** for the next **{BLESSING_DISPLAY_SECONDS} seconds**; the pond can't hold you back."
+        "The pond **boils with fortune**—**he's hauling** a storm of catches for you. "
     )
 
 
-class KeishEnergy:
-    """Runtime state for Keish blessing windows."""
+def pick_keish_success_image_path() -> Path | None:
+    """One of the Keish success PNGs at random, if any exist on disk."""
+    existing = [KEISH_ENERGY_DIR / name for name in KEISH_SUCCESS_FILENAMES if (KEISH_ENERGY_DIR / name).is_file()]
+    if not existing:
+        return None
+    return random.choice(existing)
 
-    __slots__ = ("_until",)
+
+class KeishEnergy:
+    """Runtime state: remaining flock pulls after a Keish proc."""
+
+    __slots__ = ("_rolls_left",)
 
     def __init__(self) -> None:
-        self._until: dict[str, int] = {}
+        self._rolls_left: dict[str, int] = {}
 
     def active(self, user_id: str) -> bool:
-        until = self._until.get(user_id)
-        if until is None:
-            return False
-        now = utc_ts()
-        if now >= until:
-            del self._until[user_id]
-            return False
-        return True
+        return self._rolls_left.get(user_id, 0) > 0
 
-    def remaining(self, user_id: str) -> int:
-        until = self._until.get(user_id)
-        if until is None:
-            return 0
-        return max(0, until - utc_ts())
-
-    def remaining_display(self, user_id: str) -> int:
-        return self.remaining(user_id) // 2
+    def flock_rolls_remaining(self, user_id: str) -> int:
+        return self._rolls_left.get(user_id, 0)
 
     def grant(self, user_id: str) -> None:
-        self._until[user_id] = utc_ts() + BLESSING_DURATION_SECONDS
+        self._rolls_left[user_id] = KEISH_FLOCK_ROLLS
+
+    def consume_one_roll(self, user_id: str) -> None:
+        left = self._rolls_left.get(user_id, 0)
+        if left <= 0:
+            return
+        if left <= 1:
+            self._rolls_left.pop(user_id, None)
+        else:
+            self._rolls_left[user_id] = left - 1
