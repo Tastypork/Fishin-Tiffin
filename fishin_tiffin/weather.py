@@ -48,7 +48,7 @@ _WEATHER_COPY = {
     ),
     JERM_CLOUD: (
         "Jerm brings in terrible weather",
-        "Jerm and his many clones bring in terrible weather, increasing all catch cooldowns by 50%.",
+        "Jerm and his many clones bring in terrible weather, doubling all catch cooldowns.",
     ),
 }
 
@@ -76,7 +76,7 @@ class WeatherManager:
         return 3.0 if self._current == SUNSHINE_SUNFLOWERS else 1.0
 
     def cooldown_multiplier(self) -> float:
-        return 1.5 if self._current == JERM_CLOUD else 1.0
+        return 2.0 if self._current == JERM_CLOUD else 1.0
 
     @staticmethod
     def build_proc_embed(weather_id: str) -> tuple[discord.Embed, discord.File | None]:

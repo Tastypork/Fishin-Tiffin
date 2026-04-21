@@ -1115,7 +1115,7 @@ class DuckManager(commands.Cog, name="DuckManager"):
                 "**Sunshine Sunflowers**\n"
                 "- **3×** shiny odds on new catches.\n\n"
                 "**Jerm Cloud**\n"
-                "- **1.5×** longer **catch cooldowns** for everyone (+50%)."
+                "- Catch cooldown duration is **doubled** (**2×**) for everyone."
             ),
             color=WEATHER_EMBED_COLOR,
         )
